@@ -237,7 +237,16 @@ if page == "Dashboard":
     styled_df = df_display[cols_to_show].style.apply(
         highlight_row, axis=1
     )
-    df_show = df_display.drop(columns=["Item_Category"], errors="ignore")
+    
+    DISPLAY_COLS = [
+    "Item_Name",        # รู้ว่าอะไร
+    "Current_Stock",    # เหลือกี่ชิ้น (ตัดสินใจทันที)
+    "Stock",            # ควรมีเท่าไร
+    "Days_to_Expire",  # ใกล้หมดไหม
+    "EXP_Date",         # หมดวันไหน
+]
+
+    df_show = df_display[DISPLAY_COLS]
     st.dataframe(
         df_show,
         use_container_width=True,
