@@ -237,9 +237,9 @@ if page == "Dashboard":
     styled_df = df_display[cols_to_show].style.apply(
         highlight_row, axis=1
     )
-
+    df_show = df_display.drop(columns=["Item_Category"], errors="ignore")
     st.dataframe(
-        styled_df,
+        df_show,
         use_container_width=True,
         hide_index=True
     )
