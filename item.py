@@ -13,6 +13,166 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+# ==============================
+#  CARD: BUNDLE STATUS BLOCK
+# ==============================
+def bundle_status_block(df: pd.DataFrame, warn_days: int = 30) -> None:
+    st.markdown("### 🏥 สถานะความพร้อมชุดอุปกรณ์ (Bundle)")
+
+    # ---------- Guards ----------
+    if "Bundle" not in df.columns:
+        st.info("ยังไม่มีคอลัมน์ Bundle ในไฟล์")
+        return
+
+    # ต้องมีคอลัมน์พื้นฐาน
+    needed = ["Item_Name", "Current_Stock", "Days_to_Expire"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        st.warning(f"คอลัมน์ไม่ครบสำหรับทำ Bundle dashboard: {missing}")
+        return
+
+    df_bundle = df[df["Bundle"].notna()].copy()
+    if df_bundle.empty:
+        st.info("ยังไม่มีการกำหนด Bundle")
+        return
+
+    # ---------- Bundle config ----------
+    bundles = {
+        "airway": {"icon": "🫁", "name": "Airway Management"},
+        "IV":     {"icon": "💧", "name": "Fluid Management"},
+        "cpr":    {"icon": "❤️‍🩹", "name": "CPR Kit"},
+        # เพิ่มได้เรื่อยๆ เช่น:
+        # "bleeding": {"icon": "🩸", "name": "Bleeding Control"},
+    }
+
+    # ---------- Styling ----------
+    st.markdown(
+        """
+        <style>
+        .bundle-card {
+            border-radius: 16px;
+            padding: 16px 16px;
+            border: 1px solid rgba(0,0,0,0.08);
+            box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+            margin-bottom: 12px;
+        }
+        .bundle-title {
+            font-size: 18px; font-weight: 800;
+            display:flex; align-items:center; gap:10px;
+            margin-bottom: 4px;
+        }
+        .bundle-sub {
+            font-size: 13px; opacity: 0.85; margin-bottom: 10px;
+        }
+        .pill {
+            display:inline-block;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+        .pill-ready { background: rgba(81, 207, 102, 0.18); color: #2b8a3e; }
+        .pill-not   { background: rgba(255, 107, 107, 0.18); color: #c92a2a; }
+        .mini {
+            font-size: 12px; opacity: 0.9;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---------- Helper: find problems ----------
+    def classify_problems(g: pd.DataFrame) -> dict:
+        # หมดอายุ
+        expired = g[g["Days_to_Expire"].fillna(999999) <= 0]
+        # ใกล้หมดอายุ
+        exp_soon = g[
+            (g["Days_to_Expire"].fillna(999999) > 0) &
+            (g["Days_to_Expire"].fillna(999999) <= warn_days)
+        ]
+        # stock หมด
+        out_stock = g[g["Current_Stock"].fillna(0) <= 0]
+
+        # รวม "รายการมีปัญหา" (unique ตามชื่อ)
+        problem = pd.concat([expired, exp_soon, out_stock], ignore_index=True)
+        problem = problem.drop_duplicates(subset=["Item_Name"])
+
+        return {
+            "expired": expired,
+            "exp_soon": exp_soon,
+            "out_stock": out_stock,
+            "problem": problem
+        }
+
+    # ---------- Layout: responsive columns ----------
+    # iPad แนวนอน: 2 การ์ด/แถวสวยสุด
+    cols = st.columns(2)
+
+    # group ตาม Bundle
+    grouped = list(df_bundle.groupby("Bundle"))
+    if not grouped:
+        st.info("ยังไม่มีรายการใน Bundle")
+        return
+
+    for i, (bundle_key, g) in enumerate(grouped):
+        meta = bundles.get(bundle_key, {"icon": "📦", "name": str(bundle_key)})
+
+        probs = classify_problems(g)
+        problem_df = probs["problem"]
+        is_ready = problem_df.empty
+
+        total_items = len(g)
+        problem_count = len(problem_df)
+
+        # สีพื้นตามสถานะ
+        bg = "rgba(81, 207, 102, 0.10)" if is_ready else "rgba(255, 107, 107, 0.10)"
+        pill = "pill-ready" if is_ready else "pill-not"
+        pill_text = "✅ READY" if is_ready else "❌ NOT READY"
+
+        with cols[i % 2]:
+            st.markdown(
+                f"""
+                <div class="bundle-card" style="background:{bg}">
+                  <div class="bundle-title">{meta["icon"]} {meta["name"]}</div>
+                  <div class="bundle-sub">
+                    <span class="pill {pill}">{pill_text}</span>
+                    <span class="mini">ทั้งหมด {total_items} รายการ • มีปัญหา {problem_count} รายการ</span>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # รายละเอียด (กดดูเมื่อจำเป็น)
+            with st.expander("ดูรายละเอียดรายการที่มีปัญหา"):
+                if is_ready:
+                    st.success("ไม่มีรายการมีปัญหา 🎉")
+                else:
+                    # ทำตารางแบบกระชับ (iPad friendly)
+                    show_cols = [c for c in ["Item_Name", "Current_Stock", "Days_to_Expire", "EXP_Date"] if c in g.columns]
+                    detail = problem_df.copy()
+
+                    # เพิ่ม reason column อ่านง่าย
+                    def reason(row):
+                        reasons = []
+                        if row.get("Current_Stock", 0) <= 0:
+                            reasons.append("Stock หมด")
+                        d = row.get("Days_to_Expire", 999999)
+                        if pd.notna(d) and d <= 0:
+                            reasons.append("หมดอายุ")
+                        elif pd.notna(d) and d <= warn_days:
+                            reasons.append(f"ใกล้หมด ({warn_days} วัน)")
+                        return ", ".join(reasons) if reasons else "-"
+
+                    detail["Reason"] = detail.apply(reason, axis=1)
+                    show_cols2 = ["Reason"] + show_cols
+
+                    st.dataframe(
+                        detail[show_cols2].sort_values(["Days_to_Expire"], ascending=True),
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
 # ==============================
 # 0) APP CONFIG + STYLE
@@ -535,6 +695,10 @@ def alerts_page() -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    # ===============================
+    # 🏥 Bundle Status Dashboard
+    # ===============================
+    bundle_status_block(df_items, warn_days=30)
 
 if page == "Dashboard":
     dashboard_page()
