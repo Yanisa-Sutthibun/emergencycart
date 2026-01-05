@@ -4,6 +4,7 @@
 # - Adds EXP alerts (≤30d) + ETT exchange alerts (Exchange due = EXP - 24 months; alert 30d before due).
 # - iPad-friendly: fewer columns, bigger typography, sticky-ish sidebar summary, forms to avoid multi-click.
 #fix ipad ui + status badge
+#แก้ error ตรงที่ download
 
 import os
 import io
@@ -32,6 +33,10 @@ def bundle_status_block(df: pd.DataFrame, warn_days: int = 30) -> None:
         return
 
     df_bundle = df[df["Bundle"].notna()].copy()
+    # normalize types for stable grouping
+    df_bundle["Bundle"] = df_bundle["Bundle"].astype(str).str.strip().str.lower()
+    df_bundle["Current_Stock"] = pd.to_numeric(df_bundle["Current_Stock"], errors="coerce").fillna(0)
+    df_bundle["Days_to_Expire"] = pd.to_numeric(df_bundle["Days_to_Expire"], errors="coerce").fillna(999999)
     if df_bundle.empty:
         st.info("ยังไม่มีการกำหนด Bundle")
         return
@@ -39,7 +44,7 @@ def bundle_status_block(df: pd.DataFrame, warn_days: int = 30) -> None:
     # ---------- Bundle config ----------
     bundles = {
         "airway": {"icon": "🫁", "name": "Airway Management"},
-        "IV":     {"icon": "💧", "name": "Fluid Management"},
+        "iv":     {"icon": "💧", "name": "Fluid Management"},
         "cpr":    {"icon": "❤️‍🩹", "name": "CPR Kit"},
         # เพิ่มได้เรื่อยๆ เช่น:
         # "bleeding": {"icon": "🩸", "name": "Bleeding Control"},
@@ -520,42 +525,6 @@ with st.sidebar.expander("🔄 รีเซ็ต Stock", expanded=False):
 # ==============================
 # 6) MAIN PAGES
 # ==============================
-def bundle_status_block(df: pd.DataFrame) -> None:
-    st.markdown("### สถานะความพร้อมของชุดอุปกรณ์")
-
-    if "Bundle" not in df.columns:
-        st.info("ยังไม่มีคอลัมน์ Bundle ในไฟล์")
-        return
-
-    df_bundle = df[df["Bundle"].notna()].copy()
-    if df_bundle.empty:
-        st.info("ยังไม่มีการกำหนด Bundle ในรายการอุปกรณ์")
-        return
-
-    # Friendly labels (optional)
-    bundle_labels = {
-        "airway": "Airway management",
-        "IV": "Fluid management",
-        "cpr": "CPR",
-    }
-
-    # Problem definition: stock out OR expired already
-    df_bundle["is_problem"] = (df_bundle["Current_Stock"].fillna(0) <= 0) | (df_bundle["Days_to_Expire"].fillna(999999) <= 0)
-
-    for bundle_name, group in df_bundle.groupby("Bundle"):
-        label = bundle_labels.get(str(bundle_name), str(bundle_name))
-        problem_items = group[group["is_problem"]]
-
-        if problem_items.empty:
-            st.success(f"✅ {label} พร้อมใช้งาน")
-        else:
-            names = problem_items["Item_Name"].astype(str).tolist()
-            st.error(
-                f"❌ {label} ไม่พร้อมใช้งาน\n\n"
-                f"รายการที่มีปัญหา:\n- " + "\n- ".join(names)
-            )
-
-
 def dashboard_page() -> None:
     st.title("📋 Emergency Cart Checklist")
     st.caption("เรียงตามวันใกล้หมดอายุ • iPad-friendly view")
