@@ -177,29 +177,39 @@ df_sorted = df_items.sort_values(["EXP_Date_ts", "Item_Name"], na_position="last
 # 4) UI HELPERS
 # ==============================
 def badge_for_row(row: pd.Series) -> str:
+    """Return a compact, iPad-friendly status label (no HTML)."""
     days = row.get("Days_to_Expire", None)
     cur = row.get("Current_Stock", None)
 
     # Unknown date
     if pd.isna(days):
-        return '<span class="badge gray">No EXP</span>'
+        return "⚪ No EXP"
 
-    # Expired
-    if days <= 0:
-        return '<span class="badge red">Expired</span>'
-
-    # Exp soon
-    if 0 < days <= 30:
-        return '<span class="badge yellow">≤ 30 days</span>'
-
-    # Stock out
+    # Stock out has priority if current stock is 0 (even if EXP is far)
     try:
         if float(cur) <= 0:
-            return '<span class="badge red">Out of stock</span>'
+            return "❌ Out"
     except Exception:
         pass
 
-    return '<span class="badge green">OK</span>'
+    # Expired
+    if days <= 0:
+        return "🔴 EXP"
+
+    # Expiring soon
+    if 0 < days <= 30:
+        return "🟡 ≤30d"
+
+    # Low stock (optional quick cue)
+    try:
+        if float(cur) == 1:
+            return "⚠️ Low"
+    except Exception:
+        pass
+
+    return "🟢 OK"
+
+
 
 
 def highlight_row(row: pd.Series):
