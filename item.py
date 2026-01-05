@@ -31,6 +31,56 @@ check_password()
 # ตั้งค่าหน้า Streamlit
 # -----------------------------
 st.set_page_config(page_title="รายการ Check ของ", layout="wide")
+st.set_page_config(
+    page_title="Emergency Cart Checklist",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+/* --- overall spacing --- */
+.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+
+/* --- hide Streamlit default menu/footer (optional) --- */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* --- sidebar look --- */
+section[data-testid="stSidebar"] { background: #fafafa; }
+section[data-testid="stSidebar"] .stMarkdown { font-size: 0.95rem; }
+
+/* --- card style helpers --- */
+.card {
+  background: white;
+  border: 1px solid #ececec;
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 10px rgba(0,0,0,0.04);
+}
+.card h3 { margin: 0 0 8px 0; }
+.muted { color: #6b7280; font-size: 0.9rem; }
+.badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.82rem;
+  border: 1px solid #eee;
+}
+.badge-ok { background: #eafff1; border-color:#b7f7cf; }
+.badge-warn { background: #fff7e6; border-color:#ffdca8; }
+.badge-bad { background: #ffecec; border-color:#ffb4b4; }
+
+/* --- make dataframe look cleaner --- */
+div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
+
+/* --- on iPad: tighten a bit --- */
+@media (max-width: 1024px){
+  .block-container { padding-left: 1rem; padding-right: 1rem; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 # -----------------------------
 # 1) หาโฟลเดอร์ที่ไฟล์ item.py อยู่
@@ -168,9 +218,19 @@ st.sidebar.title("📌 เมนู")
 page = st.sidebar.radio("ไปที่หน้า", ["Dashboard", "⏰ EXP ภายใน 30 วัน"], index=0)
 
 if page == "Dashboard":
-    st.title("📋 รายการ Check ของ")
-    st.subheader("Emergency Cart")
-    st.caption("เรียงตามวันใกล้หมดอายุ")
+    st.markdown("""
+<div class="card">
+  <h2 style="margin:0;">📋 รายการ Check ของ <span class="muted">Emergency Cart</span></h2>
+  <div style="margin-top:10px;">
+    <span class="badge badge-ok">Live Checklist</span>
+    <span class="badge">CSV</span>
+    <span class="badge">iPad-friendly</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.write("")  # spacing
+
     #-------Dashboard สถานะ--------#
     expired_count = (df_sorted["Days_to_Expire"] <= 0).sum()
     near_exp_count = ((df_sorted["Days_to_Expire"] > 0) & (df_sorted["Days_to_Expire"] <= 30)).sum()
