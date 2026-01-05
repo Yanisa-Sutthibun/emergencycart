@@ -3,6 +3,7 @@
 # - Uses CSV as the single source of truth (writes back to item_ORM.csv in the same folder).
 # - Adds EXP alerts (≤30d) + ETT exchange alerts (Exchange due = EXP - 24 months; alert 30d before due).
 # - iPad-friendly: fewer columns, bigger typography, sticky-ish sidebar summary, forms to avoid multi-click.
+#fix ipad ui + status badge
 
 import os
 import io
