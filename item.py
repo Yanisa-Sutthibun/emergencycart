@@ -3,6 +3,30 @@ import pandas as pd
 import os
 from io import BytesIO
 import io
+import hmac
+
+def check_password():
+    if "auth" not in st.session_state:
+        st.session_state["auth"] = False
+
+    if st.session_state["auth"]:
+        return
+
+    st.sidebar.header("🔐 Login")
+    pw = st.sidebar.text_input("Password", type="password")
+
+    if st.sidebar.button("Login"):
+        secret = st.secrets.get("APP_PASSWORD", "")
+        if secret and hmac.compare_digest(pw, secret):
+            st.session_state["auth"] = True
+            st.rerun()
+        else:
+            st.sidebar.error("รหัสไม่ถูกต้อง")
+
+    st.stop()
+
+check_password()
+
 # -----------------------------
 # ตั้งค่าหน้า Streamlit
 # -----------------------------
@@ -351,183 +375,94 @@ else:
             file_name="exp_alerts.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+st.sidebar.header("🎯 เลือกอุปกรณ์ (เลือกครั้งเดียว)")
 
-st.sidebar.header("🛠 แก้ไขวันหมดอายุ (EXP)")
+# ให้ใช้ df_items ที่คำนวณ Days_to_Expire แล้วจะดีมาก
+# ถ้ายังไม่คำนวณ ให้ใช้ df_items / df_sorted ที่คุณมี
 
+# ทำ list สำหรับเลือก
 item_list = df_items["Item_Name"].dropna().unique().tolist()
+selected_item = st.sidebar.selectbox("เลือกอุปกรณ์", item_list, key="selected_item_main")
 
-selected_item = st.sidebar.selectbox(
-    "เลือกอุปกรณ์",
-    item_list
-)
+# ดึงแถวของ item ที่เลือก (เอาอันแรกก่อน กรณีชื่อซ้ำ)
+sel = df_items[df_items["Item_Name"] == selected_item].iloc[0].copy()
 
-# ดึงข้อมูลของ item ที่เลือก
-item_row = df_items[df_items["Item_Name"] == selected_item].iloc[0]
+# แปลงวันที่ให้ดูง่าย
+exp_date = sel.get("EXP_Date")
+days_exp = sel.get("Days_to_Expire")
 
-old_exp = item_row["EXP_Date"]
+stock = int(sel.get("Stock", 0) if pd.notna(sel.get("Stock")) else 0)
+current = int(sel.get("Current_Stock", 0) if pd.notna(sel.get("Current_Stock")) else 0)
+
+st.sidebar.markdown("### 📌 สรุปข้อมูล")
+st.sidebar.write(f"**Item:** {selected_item}")
+st.sidebar.write(f"**EXP:** {exp_date}")
+st.sidebar.write(f"**Days to expire:** {days_exp}")
+st.sidebar.write(f"**Stock:** {current} / {stock}")
+
+st.sidebar.divider()
+st.sidebar.subheader("🛠 แก้ไขวันหมดอายุ (EXP)")
+
+old_exp = sel.get("EXP_Date")
 if pd.isna(old_exp):
     old_exp = pd.Timestamp.today().date()
 
-new_exp = st.sidebar.date_input(
-    "วันหมดอายุใหม่",
-    value=pd.to_datetime(old_exp)
-)
+new_exp = st.sidebar.date_input("วันหมดอายุใหม่", value=pd.to_datetime(old_exp), key="new_exp")
 
 if st.sidebar.button("💾 บันทึกวันหมดอายุ"):
-    # แปลงเป็น datetime
-    new_exp_dt = pd.to_datetime(new_exp)
+    df_items.loc[df_items["Item_Name"] == selected_item, "EXP_Date"] = pd.to_datetime(new_exp)
 
-    df_items.loc[
-        df_items["Item_Name"] == selected_item, "EXP_Date"
-    ] = new_exp_dt
+    df_out = df_items.copy()
+    df_out["EXP_Date"] = pd.to_datetime(df_out["EXP_Date"], errors="coerce").dt.strftime("%d/%m/%Y")
 
-    # บันทึกลง CSV (เขียนทับไฟล์เดิม)
-    df_items_out = df_items.copy()
-    df_items_out["EXP_Date"] = pd.to_datetime(
-        df_items_out["EXP_Date"]
-    ).dt.strftime("%d/%m/%Y")
-
-    df_items_out.to_csv(
-        DATA_FILE,
-        index=False,
-        encoding="utf-8-sig"
-    )
+    temp_file = DATA_FILE.replace(".csv", "_temp.csv")
+    df_out.to_csv(temp_file, index=False, encoding="utf-8-sig")
+    os.replace(temp_file, DATA_FILE)
 
     st.sidebar.success("✅ บันทึกวันหมดอายุเรียบร้อยแล้ว")
     st.rerun()
+
     # -----------------------------
 # 9) Sidebar: ใช้ของ / ตัด stock
 # -----------------------------
-st.sidebar.header("📦 ใช้ของ / ตัด Stock")
+st.sidebar.divider()
+st.sidebar.subheader("📦 ใช้ของ / ตัด Stock")
 
-item_list_use = df_items["Item_Name"].dropna().unique().tolist()
-
-selected_use_item = st.sidebar.selectbox(
-    "เลือกอุปกรณ์ที่จะใช้",
-    item_list_use,
-    key="use_item"
-)
-
-# ดึงข้อมูล row ของ item ที่เลือก
-use_row = df_items[df_items["Item_Name"] == selected_use_item].iloc[0]
-
-current_stock = int(use_row["Current_Stock"])
-base_stock = int(use_row["Stock"])
-
-st.sidebar.write(f"Stock ปกติ: {base_stock} | คงเหลือปัจจุบัน: {current_stock}")
-
-qty_use = st.sidebar.number_input(
-    "จำนวนที่ใช้",
-    min_value=1,
-    value=1,
-    step=1,
-    key="qty_use"
-)
+qty_use = st.sidebar.number_input("จำนวนที่ใช้", min_value=1, value=1, step=1, key="qty_use")
 
 if st.sidebar.button("✅ ตัด Stock (ใช้ของ)"):
-    if current_stock <= 0:
+    if current <= 0:
         st.sidebar.error("❌ ของชิ้นนี้ Stock หมดแล้ว")
-
-    elif qty_use > current_stock:
+    elif qty_use > current:
         st.sidebar.error("❌ จำนวนที่ใช้มากกว่า Stock ปัจจุบัน")
-
     else:
-        # ✅ อัปเดตค่า Current_Stock ใน DataFrame
-        new_stock = current_stock - qty_use
-        df_items.loc[
-            df_items["Item_Name"] == selected_use_item,
-            "Current_Stock"
-        ] = new_stock
+        df_items.loc[df_items["Item_Name"] == selected_item, "Current_Stock"] = current - qty_use
 
-        # ✅ เตรียม DataFrame สำหรับบันทึกกลับ CSV
-        df_items_out = df_items.copy()
-
-        # แปลง EXP_Date กลับเป็น string ก่อน save
-        df_items_out["EXP_Date"] = pd.to_datetime(
-            df_items_out["EXP_Date"]
-        ).dt.strftime("%d/%m/%Y")
-
+        df_out = df_items.copy()
+        df_out["EXP_Date"] = pd.to_datetime(df_out["EXP_Date"], errors="coerce").dt.strftime("%d/%m/%Y")
         temp_file = DATA_FILE.replace(".csv", "_temp.csv")
+        df_out.to_csv(temp_file, index=False, encoding="utf-8-sig")
+        os.replace(temp_file, DATA_FILE)
 
-        try:
-            # 1) เขียนไฟล์ชั่วคราวก่อน
-            df_items_out.to_csv(
-                temp_file,
-                index=False,
-                encoding="utf-8-sig"
-            )
-
-            # 2) ถ้าเขียนสำเร็จ → replace ทับไฟล์จริง
-            os.replace(temp_file, DATA_FILE)
-
-            st.sidebar.success(
-                f"✅ ตัด Stock ของ '{selected_use_item}' จำนวน {qty_use} ชิ้น | คงเหลือ {new_stock}"
-            )
-
-            st.rerun()
-
-        except PermissionError:
-            st.sidebar.error("❌ ไม่สามารถบันทึกไฟล์ได้ (ไฟล์อาจถูกเปิดใน Excel อยู่)")
-
-        except Exception as e:
-            st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกไฟล์: {e}")
+        st.sidebar.success(f"✅ ตัดแล้ว เหลือ {current - qty_use}")
+        st.rerun()
 
 # -----------------------------#
 # Sidebar: 🔄 รีเซ็ต Stock กลับค่าเริ่มต้น
+st.sidebar.divider()
+st.sidebar.subheader("🔄 รีเซ็ต Stock")
 
-st.sidebar.header("🔄 รีเซ็ต Stock")
+if st.sidebar.button("🔁 รีเซ็ต Stock เป็นค่าเริ่มต้น"):
+    df_items.loc[df_items["Item_Name"] == selected_item, "Current_Stock"] = stock
 
-item_list_reset = df_items["Item_Name"].dropna().unique().tolist()
-
-selected_reset_item = st.sidebar.selectbox(
-    "เลือกอุปกรณ์ที่ต้องการรีเซ็ต",
-    item_list_reset,
-    key="reset_item"
-)
-
-# ดึงข้อมูล row ที่เลือก
-row_reset = df_items[df_items["Item_Name"] == selected_reset_item].iloc[0]
-base_stock_reset = int(row_reset["Stock"])
-current_stock_reset = int(row_reset["Current_Stock"])
-
-st.sidebar.write(f"Stock ปกติ: {base_stock_reset} | คงเหลือปัจจุบัน: {current_stock_reset}")
-
-if st.sidebar.button("🔁 รีเซ็ต Stock"):
-    # 1) อัปเดตค่าใน DataFrame
-    df_items.loc[
-        df_items["Item_Name"] == selected_reset_item,
-        "Current_Stock"
-    ] = base_stock_reset
-
-    # 2) เตรียม DataFrame สำหรับเซฟกลับ CSV
-    df_items_out = df_items.copy()
-    df_items_out["EXP_Date"] = pd.to_datetime(
-        df_items_out["EXP_Date"]
-    ).dt.strftime("%d/%m/%Y")
-
+    df_out = df_items.copy()
+    df_out["EXP_Date"] = pd.to_datetime(df_out["EXP_Date"], errors="coerce").dt.strftime("%d/%m/%Y")
     temp_file = DATA_FILE.replace(".csv", "_temp.csv")
+    df_out.to_csv(temp_file, index=False, encoding="utf-8-sig")
+    os.replace(temp_file, DATA_FILE)
 
-    try:
-        # เขียนไฟล์ชั่วคราว
-        df_items_out.to_csv(
-            temp_file,
-            index=False,
-            encoding="utf-8-sig"
-        )
-
-        # แทนที่ไฟล์จริง
-        os.replace(temp_file, DATA_FILE)
-
-        st.sidebar.success(
-            f"✅ รีเซ็ต Stock ของ '{selected_reset_item}' เป็น {base_stock_reset} แล้ว"
-        )
-        st.rerun()
-
-    except PermissionError:
-        st.sidebar.error("❌ ไม่สามารถบันทึกไฟล์ได้ (ไฟล์อาจถูกเปิดใน Excel อยู่)")
-
-    except Exception as e:
-        st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกไฟล์: {e}")
+    st.sidebar.success(f"✅ รีเซ็ตเป็น {stock} แล้ว")
+    st.rerun()
 
 
 # สร้างไฟล์ Excel ในหน่วยความจำ
