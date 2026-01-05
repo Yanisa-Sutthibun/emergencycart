@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 from io import BytesIO
+import io
 # -----------------------------
 # ตั้งค่าหน้า Streamlit
 # -----------------------------
@@ -55,6 +56,34 @@ df_items.loc[df_items["Is_ETT"] & df_items["EXP_Date_ts"].notna(), "Exchange_Due
 )
 
 df_items["Days_to_Exchange"] = (df_items["Exchange_Due_ts"] - today).dt.days
+# ===============================
+# เตรียม DataFrame แจ้งเตือน (GLOBAL)
+# ===============================
+
+df_expired = pd.DataFrame()
+df_expiring30 = pd.DataFrame()
+df_ett_due = pd.DataFrame()
+df_ett_soon = pd.DataFrame()
+
+if not df_items.empty:
+    df_expired = df_items[df_items["Days_to_Expire"] <= 0]
+
+    df_expiring30 = df_items[
+        (df_items["Days_to_Expire"] > 0) &
+        (df_items["Days_to_Expire"] <= 30)
+    ]
+
+    if "Is_ETT" in df_items.columns:
+        df_ett_due = df_items[
+            (df_items["Is_ETT"]) &
+            (df_items["Days_to_Exchange"] <= 0)
+        ]
+
+        df_ett_soon = df_items[
+            (df_items["Is_ETT"]) &
+            (df_items["Days_to_Exchange"] > 0) &
+            (df_items["Days_to_Exchange"] <= 30)
+        ]
 
 # ทำคอลัมน์วันที่สำหรับแสดงผล (date) แยกจาก *_ts
 df_items["EXP_Date"] = df_items["EXP_Date_ts"].dt.date
@@ -135,38 +164,32 @@ if page == "Dashboard":
     st.markdown("### สถานะความพร้อมของชุดอุปกรณ์")
 
     # map ชื่อ bundle -> ข้อความที่อยากแสดง
+    # map ชื่อ bundle -> ข้อความที่อยากแสดง
     bundle_labels = {
         "airway": "Airway management",
         "IV": "Fluid management",
     }
 
     # เลือกเฉพาะแถวที่มีค่า Bundle
-    df_bundle = df_items[df_items["Bundle"].notna()]
+    df_bundle = df_items[df_items["Bundle"].notna()].copy()
 
     if df_bundle.empty:
         st.info("ยังไม่มีการกำหนด Bundle ในรายการอุปกรณ์")
     else:
-        # group ตามชื่อ Bundle
+        # แสดงสถานะทีละ Bundle
         for bundle_name, group in df_bundle.groupby("Bundle"):
             label = bundle_labels.get(bundle_name, bundle_name)
 
-            # เงื่อนไข "ไม่พร้อมใช้งาน":
-            # มี item ใดใน bundle นี้ที่ Current_Stock == 0
-            not_ready = (group["Current_Stock"] <= 0).any()
+            # ไม่พร้อมใช้งาน ถ้ามีของหมด (Current_Stock<=0) หรือหมดอายุแล้ว (Days_to_Expire<=0)
+            problem_items = group[(group["Current_Stock"] <= 0) | (group["Days_to_Expire"] <= 0)].copy()
 
-            problem_items = group[
-        (group["Current_Stock"] <= 0) | (group["Days_to_Expire"] <= 0)
-    ]
-
-    if not problem_items.empty:
-        item_names = problem_items["Item_Name"].astype(str).tolist()
-
-        st.error(
-            f"❌ {label} ไม่พร้อมใช้งาน\n\n"
-            f"รายการที่มีปัญหา:\n- " + "\n- ".join(item_names)
-        )
-    else:
-        st.success(f"✅ {label} พร้อมใช้งาน")
+            if not problem_items.empty:
+                item_names = problem_items["Item_Name"].astype(str).tolist()
+                st.error(
+                    f"❌ {label} ไม่พร้อมใช้งาน\n\nรายการที่มีปัญหา:\n- " + "\n- ".join(item_names)
+                )
+            else:
+                st.success(f"✅ {label} พร้อมใช้งาน")
 
     search_text = st.text_input("ค้นหาอุปกรณ์ (พิมพ์บางส่วนของชื่อ Item_Name)", "")
 
@@ -196,6 +219,18 @@ if page == "Dashboard":
         use_container_width=True,
         hide_index=True
     )
+
+    st.markdown("**⬇️ ดาวน์โหลดรายการทั้งหมด (หน้า Dashboard)**")
+    out_dash = BytesIO()
+    with pd.ExcelWriter(out_dash, engine="openpyxl") as writer:
+        df_display[cols_to_show].to_excel(writer, index=False, sheet_name="Emergency_Cart")
+    st.download_button(
+        label="⬇️ ดาวน์โหลด Excel (Dashboard)",
+        data=out_dash.getvalue(),
+        file_name="emergency_cart_dashboard.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 
 else:
     st.title("⏰ EXP ภายใน 30 วัน")
@@ -288,48 +323,35 @@ else:
                 use_container_width=True,
                 hide_index=True
             )
+    # -----------------------------
+    # ดาวน์โหลด Excel แจ้งเตือน (เฉพาะหน้า EXP ภายใน 30 วัน)
+    # -----------------------------
+    dfs_to_export = []
 
-        # ดาวน์โหลดรายการ ETT ส่งแลกเป็น Excel
-        st.markdown("**⬇️ ดาวน์โหลดรายการ ETT ส่งแลก**")
-        df_ett_export = pd.concat([df_ett_overdue, df_ett_30], ignore_index=True)
-        if not df_ett_export.empty:
-            from io import BytesIO
-            output_ett = BytesIO()
-            with pd.ExcelWriter(output_ett, engine="openpyxl") as writer:
-                df_ett_export.sort_values(["Days_to_Exchange", "Exchange_Due"])[cols_ett].to_excel(
-                    writer, index=False, sheet_name="ETT_Exchange_Alert"
-                )
-            st.download_button(
-                label="ดาวน์โหลด Excel (ETT ส่งแลก)",
-                data=output_ett.getvalue(),
-                file_name="emergency_cart_ett_exchange_alert.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    if not df_expired.empty:
+        dfs_to_export.append(("Expired", df_expired))
+    if not df_exp30.empty:
+        dfs_to_export.append(("Expiring_30d", df_exp30))
 
-    # ดาวน์โหลดรายการแจ้งเตือนเป็น Excel (เฉพาะหน้านี้)
-    st.divider()
-    st.subheader("⬇️ ดาวน์โหลดรายการแจ้งเตือน (Expired + Expiring ≤ 30 วัน)")
+    if "df_ett_overdue" in locals() and not df_ett_overdue.empty:
+        dfs_to_export.append(("ETT_Exchange_Due", df_ett_overdue))
+    if "df_ett_30" in locals() and not df_ett_30.empty:
+        dfs_to_export.append(("ETT_Exchange_30d", df_ett_30))
 
-    df_export = pd.concat([df_expired, df_exp30], ignore_index=True)
-    if df_export.empty:
-        st.info("ยังไม่มีรายการสำหรับดาวน์โหลด")
+    if len(dfs_to_export) == 0:
+        st.caption("✅ ตอนนี้ไม่มีรายการหมดอายุ/ใกล้หมดอายุ/ใกล้ส่งแลก")
     else:
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df_export.sort_values(["Days_to_Expire", "EXP_Date"])[cols_to_show].to_excel(
-                writer, index=False, sheet_name="EXP_Alert"
-            )
+        out_alert = BytesIO()
+        with pd.ExcelWriter(out_alert, engine="openpyxl") as writer:
+            for name, df in dfs_to_export:
+                df.to_excel(writer, sheet_name=name[:31], index=False)
         st.download_button(
-            label="⬇️ ดาวน์โหลด Excel (EXP Alert)",
-            data=output.getvalue(),
-            file_name="emergency_cart_exp_alert.xlsx",
+            "📥 ดาวน์โหลด Excel แจ้งเตือน",
+            data=out_alert.getvalue(),
+            file_name="exp_alerts.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-
-# -----------------------------
-# 8) Sidebar: แก้ไขวันหมดอายุ (EXP)
-# -----------------------------
 st.sidebar.header("🛠 แก้ไขวันหมดอายุ (EXP)")
 
 item_list = df_items["Item_Name"].dropna().unique().tolist()
@@ -509,21 +531,3 @@ if st.sidebar.button("🔁 รีเซ็ต Stock"):
 
 
 # สร้างไฟล์ Excel ในหน่วยความจำ
-output = BytesIO()
-with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df_display[cols_to_show].to_excel(
-        writer,
-        index=False,
-        sheet_name="Emergency Cart"
-    )
-
-excel_data = output.getvalue()
-
-st.download_button(
-    label="⬇️ ดาวน์โหลดรายการเป็น Excel",
-    data=excel_data,
-    file_name="emergency_cart_check.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-
