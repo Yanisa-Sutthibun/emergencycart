@@ -1,0 +1,529 @@
+import streamlit as st
+import pandas as pd
+import os
+from io import BytesIO
+# -----------------------------
+# ตั้งค่าหน้า Streamlit
+# -----------------------------
+st.set_page_config(page_title="รายการ Check ของ", layout="wide")
+
+# -----------------------------
+# 1) หาโฟลเดอร์ที่ไฟล์ item.py อยู่
+# -----------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# -----------------------------
+# 2) กำหนดไฟล์ CSV ให้อยู่โฟลเดอร์เดียวกับ item.py
+# -----------------------------
+DATA_FILE = os.path.join(BASE_DIR, "item_ORM.csv")
+
+# -----------------------------
+# 3) ตรวจว่าไฟล์มีอยู่จริงหรือไม่
+# -----------------------------
+if not os.path.exists(DATA_FILE):
+    st.error("❌ ไม่พบไฟล์ item_ORM.csv กรุณาวางไฟล์ไว้ในโฟลเดอร์เดียวกับ item.py")
+    st.stop()
+
+# -----------------------------
+# 4) โหลดข้อมูลจาก CSV (รองรับภาษาไทย)
+# -----------------------------
+df_items = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+
+# -----------------------------
+# 5) แปลงวันที่ + คำนวณ Days_to_Expire
+#    + เพิ่ม "วันส่งแลก" สำหรับ Endotracheal Tube (ETT)
+#      กติกา: ต้องส่งแลกก่อนวันหมดอายุ 24 เดือน
+#      และแจ้งเตือนล่วงหน้า 30 วันก่อนวันส่งแลก
+# -----------------------------
+df_items["EXP_Date_ts"] = pd.to_datetime(
+    df_items["EXP_Date"],
+    format="%d/%m/%Y",   # ถ้าใน CSV เป็น 2025-11-01 ให้ลบบรรทัด format ออก
+    errors="coerce"
+)
+
+today = pd.Timestamp.today().normalize()
+df_items["Days_to_Expire"] = (df_items["EXP_Date_ts"] - today).dt.days
+
+# ระบุ ETT ด้วยชื่อ (ปรับ regex ได้ตามชื่อที่คุณใช้จริงในไฟล์)
+df_items["Is_ETT"] = df_items["Item_Name"].astype(str).str.contains(r"\bETT\b|endotracheal", case=False, na=False)
+
+# คำนวณวัน "ส่งแลก" = EXP - 24 เดือน (เฉพาะ ETT)
+# ใช้ DateOffset เพื่อจัดการเดือน/ปีให้ถูกต้อง
+df_items["Exchange_Due_ts"] = pd.NaT
+df_items.loc[df_items["Is_ETT"] & df_items["EXP_Date_ts"].notna(), "Exchange_Due_ts"] = (
+    df_items.loc[df_items["Is_ETT"] & df_items["EXP_Date_ts"].notna(), "EXP_Date_ts"] - pd.DateOffset(months=24)
+)
+
+df_items["Days_to_Exchange"] = (df_items["Exchange_Due_ts"] - today).dt.days
+
+# ทำคอลัมน์วันที่สำหรับแสดงผล (date) แยกจาก *_ts
+df_items["EXP_Date"] = df_items["EXP_Date_ts"].dt.date
+df_items["Exchange_Due"] = df_items["Exchange_Due_ts"].dt.date
+
+# เรียงตามวันหมดอายุจากใกล้สุดไปไกลสุด
+df_sorted = df_items.sort_values("EXP_Date")
+
+# -----------------------------
+# 6) ฟังก์ชัน simple rule สำหรับไฮไลต์สี
+#    Rule:
+#    - ถ้า Stock == 1 และ Current_Stock == 1 → เช็คสีจากวันหมดอายุเท่านั้น
+#    - ถ้าอย่างอื่น → ใช้ rule เดิม
+# -----------------------------
+def highlight_row(row):
+    days = row["Days_to_Expire"]
+    stock = row["Stock"]
+    current = row["Current_Stock"]
+
+    # handle NaN ป้องกัน error
+    if pd.isna(days):
+        days = 999999
+    if pd.isna(stock):
+        stock = 0
+    if pd.isna(current):
+        current = 0
+
+    # เริ่มต้นไม่มีสี
+    color = ""
+
+    # กรณีของที่โดยระบบมีแค่ 1 ชิ้นอยู่แล้ว (stock=1 และ current=1)
+    # → ใช้ rule เฉพาะวันหมดอายุ
+    if (stock == 1) and (current == 1):
+        if days <= 0:
+            color = "#ffcccc"   # แดง: หมดอายุแล้ว
+        elif days <= 30:
+            color = "#fff3cd"   # เหลือง: ใกล้หมดอายุ
+
+    else:
+        # กรณีทั่วไป
+        # 🔴 แดง: หมดอายุ หรือของหมด
+        if (days <= 0) or (current <= 0):
+            color = "#ffcccc"
+        # 🟡 เหลือง: ใกล้หมดอายุ หรือ เหลือ 1 ชิ้น
+        elif (days <= 30) or (current == 1):
+            color = "#fff3cd"
+
+    if color:
+        return [f"background-color: {color}"] * len(row)
+    else:
+        return [""] * len(row)
+
+# -----------------------------
+# 7) UI หน้าเว็บ
+# -----------------------------
+# เมนูนำทาง (ง่าย ๆ ไฟล์เดียว)
+st.sidebar.title("📌 เมนู")
+page = st.sidebar.radio("ไปที่หน้า", ["Dashboard", "⏰ EXP ภายใน 30 วัน"], index=0)
+
+if page == "Dashboard":
+    st.title("📋 รายการ Check ของ")
+    st.subheader("Emergency Cart")
+    st.caption("เรียงตามวันใกล้หมดอายุ")
+    #-------Dashboard สถานะ--------#
+    expired_count = (df_sorted["Days_to_Expire"] <= 0).sum()
+    near_exp_count = ((df_sorted["Days_to_Expire"] > 0) & (df_sorted["Days_to_Expire"] <= 30)).sum()
+    zero_stock_count = (df_sorted["Current_Stock"] <= 0).sum()
+    low_stock_count = ((df_sorted["Current_Stock"] == 1) & (df_sorted["Stock"] > 1)).sum()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("🛑 หมดอายุแล้ว", expired_count)
+    col2.metric("⏳ ใกล้หมดอายุ (≤30 วัน)", near_exp_count)
+    col3.metric("📦 Stock หมด", zero_stock_count)
+    col4.metric("⚠️ Stock เหลือ 1 ชิ้น", low_stock_count)
+    # -----------------------------
+    # สถานะความพร้อมของชุดอุปกรณ์ตาม Bundle
+    # -----------------------------
+    st.markdown("### สถานะความพร้อมของชุดอุปกรณ์")
+
+    # map ชื่อ bundle -> ข้อความที่อยากแสดง
+    bundle_labels = {
+        "airway": "Airway management",
+        "IV": "Fluid management",
+    }
+
+    # เลือกเฉพาะแถวที่มีค่า Bundle
+    df_bundle = df_items[df_items["Bundle"].notna()]
+
+    if df_bundle.empty:
+        st.info("ยังไม่มีการกำหนด Bundle ในรายการอุปกรณ์")
+    else:
+        # group ตามชื่อ Bundle
+        for bundle_name, group in df_bundle.groupby("Bundle"):
+            label = bundle_labels.get(bundle_name, bundle_name)
+
+            # เงื่อนไข "ไม่พร้อมใช้งาน":
+            # มี item ใดใน bundle นี้ที่ Current_Stock == 0
+            not_ready = (group["Current_Stock"] <= 0).any()
+
+            problem_items = group[
+        (group["Current_Stock"] <= 0) | (group["Days_to_Expire"] <= 0)
+    ]
+
+    if not problem_items.empty:
+        item_names = problem_items["Item_Name"].astype(str).tolist()
+
+        st.error(
+            f"❌ {label} ไม่พร้อมใช้งาน\n\n"
+            f"รายการที่มีปัญหา:\n- " + "\n- ".join(item_names)
+        )
+    else:
+        st.success(f"✅ {label} พร้อมใช้งาน")
+
+    search_text = st.text_input("ค้นหาอุปกรณ์ (พิมพ์บางส่วนของชื่อ Item_Name)", "")
+
+    # ถ้าไม่ใส่อะไร แสดงทั้งหมด, ถ้าใส่ให้กรองตาม Item_Name
+    if search_text:
+        df_display = df_sorted[
+            df_sorted["Item_Name"].str.contains(search_text, case=False, na=False)
+        ]
+    else:
+        df_display = df_sorted
+
+    cols_to_show = [
+        "Item_Name",
+        "Item_Category",
+        "EXP_Date",
+        "Days_to_Expire",
+        "Stock",
+        "Current_Stock",
+    ]
+
+    styled_df = df_display[cols_to_show].style.apply(
+        highlight_row, axis=1
+    )
+
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+    st.title("⏰ EXP ภายใน 30 วัน")
+    st.caption("รายการที่หมดอายุแล้ว และรายการที่จะหมดอายุภายใน 30 วัน")
+
+    # ใช้ df_items ที่คำนวณ Days_to_Expire แล้ว
+    df_alert = df_items.copy()
+
+    # จัดหมวด
+    df_expired = df_alert[df_alert["Days_to_Expire"].fillna(999999) <= 0].copy()
+    df_exp30 = df_alert[
+        (df_alert["Days_to_Expire"].fillna(999999) > 0) &
+        (df_alert["Days_to_Expire"].fillna(999999) <= 30)
+    ].copy()
+
+    # สรุปตัวเลข
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🛑 หมดอายุแล้ว", len(df_expired))
+    c2.metric("⚠️ จะหมดอายุ ≤ 30 วัน", len(df_exp30))
+    c3.metric("📦 รายการทั้งหมด", len(df_alert))
+
+    cols_to_show = ["Item_Name", "Item_Category", "EXP_Date", "Days_to_Expire", "Stock", "Current_Stock"]
+    cols_to_show = [c for c in cols_to_show if c in df_alert.columns]
+
+    # แสดงตาราง
+    st.subheader("🛑 หมดอายุแล้ว (Days_to_Expire ≤ 0)")
+    if df_expired.empty:
+        st.success("ไม่มีรายการที่หมดอายุแล้ว 🎉")
+    else:
+        st.dataframe(
+            df_expired.sort_values(["Days_to_Expire", "EXP_Date"])[cols_to_show],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.subheader("⚠️ จะหมดอายุภายใน 30 วัน (1–30 วัน)")
+    if df_exp30.empty:
+        st.success("ไม่มีรายการที่จะหมดอายุใน 30 วัน 👍")
+    else:
+        st.dataframe(
+            df_exp30.sort_values(["Days_to_Expire", "EXP_Date"])[cols_to_show],
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+    # -----------------------------
+    # แจ้งเตือนพิเศษ: ETT ต้อง "ส่งแลก" ก่อนวันหมดอายุ 24 เดือน
+    # แจ้งเตือนล่วงหน้า 30 วันก่อนวันส่งแลก
+    # -----------------------------
+    st.divider()
+    st.subheader("🔁 ETT: แจ้งเตือนวันส่งแลก (ก่อน EXP 24 เดือน)")
+
+    # กรองเฉพาะ ETT ที่คำนวณวันส่งแลกได้
+    df_ett = df_alert[df_alert.get("Is_ETT", False) == True].copy()
+    df_ett = df_ett[df_ett["Exchange_Due"].notna()].copy()
+
+    if df_ett.empty:
+        st.info("ไม่พบรายการ ETT หรือยังไม่มีข้อมูลวันหมดอายุที่คำนวณวันส่งแลกได้")
+    else:
+        df_ett_overdue = df_ett[df_ett["Days_to_Exchange"].fillna(999999) <= 0].copy()
+        df_ett_30 = df_ett[
+            (df_ett["Days_to_Exchange"].fillna(999999) > 0) &
+            (df_ett["Days_to_Exchange"].fillna(999999) <= 30)
+        ].copy()
+
+        e1, e2 = st.columns(2)
+        e1.metric("🛑 เกินกำหนดส่งแลกแล้ว", int(len(df_ett_overdue)))
+        e2.metric("⏳ จะถึงกำหนดส่งแลกใน 30 วัน", int(len(df_ett_30)))
+
+        cols_ett = ["Item_Name", "Item_Category", "Exchange_Due", "Days_to_Exchange", "EXP_Date", "Days_to_Expire", "Stock", "Current_Stock"]
+        cols_ett = [c for c in cols_ett if c in df_ett.columns]
+
+        st.markdown("**🛑 เกินกำหนดส่งแลกแล้ว**")
+        if df_ett_overdue.empty:
+            st.success("ไม่มีรายการเกินกำหนดส่งแลก 🎉")
+        else:
+            st.dataframe(
+                df_ett_overdue.sort_values(["Days_to_Exchange", "Exchange_Due"])[cols_ett],
+                use_container_width=True,
+                hide_index=True
+            )
+
+        st.markdown("**⚠️ จะถึงกำหนดส่งแลกใน 30 วัน (1–30 วัน)**")
+        if df_ett_30.empty:
+            st.success("ไม่มีรายการที่จะถึงกำหนดส่งแลกใน 30 วัน 👍")
+        else:
+            st.dataframe(
+                df_ett_30.sort_values(["Days_to_Exchange", "Exchange_Due"])[cols_ett],
+                use_container_width=True,
+                hide_index=True
+            )
+
+        # ดาวน์โหลดรายการ ETT ส่งแลกเป็น Excel
+        st.markdown("**⬇️ ดาวน์โหลดรายการ ETT ส่งแลก**")
+        df_ett_export = pd.concat([df_ett_overdue, df_ett_30], ignore_index=True)
+        if not df_ett_export.empty:
+            from io import BytesIO
+            output_ett = BytesIO()
+            with pd.ExcelWriter(output_ett, engine="openpyxl") as writer:
+                df_ett_export.sort_values(["Days_to_Exchange", "Exchange_Due"])[cols_ett].to_excel(
+                    writer, index=False, sheet_name="ETT_Exchange_Alert"
+                )
+            st.download_button(
+                label="ดาวน์โหลด Excel (ETT ส่งแลก)",
+                data=output_ett.getvalue(),
+                file_name="emergency_cart_ett_exchange_alert.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    # ดาวน์โหลดรายการแจ้งเตือนเป็น Excel (เฉพาะหน้านี้)
+    st.divider()
+    st.subheader("⬇️ ดาวน์โหลดรายการแจ้งเตือน (Expired + Expiring ≤ 30 วัน)")
+
+    df_export = pd.concat([df_expired, df_exp30], ignore_index=True)
+    if df_export.empty:
+        st.info("ยังไม่มีรายการสำหรับดาวน์โหลด")
+    else:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_export.sort_values(["Days_to_Expire", "EXP_Date"])[cols_to_show].to_excel(
+                writer, index=False, sheet_name="EXP_Alert"
+            )
+        st.download_button(
+            label="⬇️ ดาวน์โหลด Excel (EXP Alert)",
+            data=output.getvalue(),
+            file_name="emergency_cart_exp_alert.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+# -----------------------------
+# 8) Sidebar: แก้ไขวันหมดอายุ (EXP)
+# -----------------------------
+st.sidebar.header("🛠 แก้ไขวันหมดอายุ (EXP)")
+
+item_list = df_items["Item_Name"].dropna().unique().tolist()
+
+selected_item = st.sidebar.selectbox(
+    "เลือกอุปกรณ์",
+    item_list
+)
+
+# ดึงข้อมูลของ item ที่เลือก
+item_row = df_items[df_items["Item_Name"] == selected_item].iloc[0]
+
+old_exp = item_row["EXP_Date"]
+if pd.isna(old_exp):
+    old_exp = pd.Timestamp.today().date()
+
+new_exp = st.sidebar.date_input(
+    "วันหมดอายุใหม่",
+    value=pd.to_datetime(old_exp)
+)
+
+if st.sidebar.button("💾 บันทึกวันหมดอายุ"):
+    # แปลงเป็น datetime
+    new_exp_dt = pd.to_datetime(new_exp)
+
+    df_items.loc[
+        df_items["Item_Name"] == selected_item, "EXP_Date"
+    ] = new_exp_dt
+
+    # บันทึกลง CSV (เขียนทับไฟล์เดิม)
+    df_items_out = df_items.copy()
+    df_items_out["EXP_Date"] = pd.to_datetime(
+        df_items_out["EXP_Date"]
+    ).dt.strftime("%d/%m/%Y")
+
+    df_items_out.to_csv(
+        DATA_FILE,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    st.sidebar.success("✅ บันทึกวันหมดอายุเรียบร้อยแล้ว")
+    st.rerun()
+    # -----------------------------
+# 9) Sidebar: ใช้ของ / ตัด stock
+# -----------------------------
+st.sidebar.header("📦 ใช้ของ / ตัด Stock")
+
+item_list_use = df_items["Item_Name"].dropna().unique().tolist()
+
+selected_use_item = st.sidebar.selectbox(
+    "เลือกอุปกรณ์ที่จะใช้",
+    item_list_use,
+    key="use_item"
+)
+
+# ดึงข้อมูล row ของ item ที่เลือก
+use_row = df_items[df_items["Item_Name"] == selected_use_item].iloc[0]
+
+current_stock = int(use_row["Current_Stock"])
+base_stock = int(use_row["Stock"])
+
+st.sidebar.write(f"Stock ปกติ: {base_stock} | คงเหลือปัจจุบัน: {current_stock}")
+
+qty_use = st.sidebar.number_input(
+    "จำนวนที่ใช้",
+    min_value=1,
+    value=1,
+    step=1,
+    key="qty_use"
+)
+
+if st.sidebar.button("✅ ตัด Stock (ใช้ของ)"):
+    if current_stock <= 0:
+        st.sidebar.error("❌ ของชิ้นนี้ Stock หมดแล้ว")
+
+    elif qty_use > current_stock:
+        st.sidebar.error("❌ จำนวนที่ใช้มากกว่า Stock ปัจจุบัน")
+
+    else:
+        # ✅ อัปเดตค่า Current_Stock ใน DataFrame
+        new_stock = current_stock - qty_use
+        df_items.loc[
+            df_items["Item_Name"] == selected_use_item,
+            "Current_Stock"
+        ] = new_stock
+
+        # ✅ เตรียม DataFrame สำหรับบันทึกกลับ CSV
+        df_items_out = df_items.copy()
+
+        # แปลง EXP_Date กลับเป็น string ก่อน save
+        df_items_out["EXP_Date"] = pd.to_datetime(
+            df_items_out["EXP_Date"]
+        ).dt.strftime("%d/%m/%Y")
+
+        temp_file = DATA_FILE.replace(".csv", "_temp.csv")
+
+        try:
+            # 1) เขียนไฟล์ชั่วคราวก่อน
+            df_items_out.to_csv(
+                temp_file,
+                index=False,
+                encoding="utf-8-sig"
+            )
+
+            # 2) ถ้าเขียนสำเร็จ → replace ทับไฟล์จริง
+            os.replace(temp_file, DATA_FILE)
+
+            st.sidebar.success(
+                f"✅ ตัด Stock ของ '{selected_use_item}' จำนวน {qty_use} ชิ้น | คงเหลือ {new_stock}"
+            )
+
+            st.rerun()
+
+        except PermissionError:
+            st.sidebar.error("❌ ไม่สามารถบันทึกไฟล์ได้ (ไฟล์อาจถูกเปิดใน Excel อยู่)")
+
+        except Exception as e:
+            st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกไฟล์: {e}")
+
+# -----------------------------#
+# Sidebar: 🔄 รีเซ็ต Stock กลับค่าเริ่มต้น
+
+st.sidebar.header("🔄 รีเซ็ต Stock")
+
+item_list_reset = df_items["Item_Name"].dropna().unique().tolist()
+
+selected_reset_item = st.sidebar.selectbox(
+    "เลือกอุปกรณ์ที่ต้องการรีเซ็ต",
+    item_list_reset,
+    key="reset_item"
+)
+
+# ดึงข้อมูล row ที่เลือก
+row_reset = df_items[df_items["Item_Name"] == selected_reset_item].iloc[0]
+base_stock_reset = int(row_reset["Stock"])
+current_stock_reset = int(row_reset["Current_Stock"])
+
+st.sidebar.write(f"Stock ปกติ: {base_stock_reset} | คงเหลือปัจจุบัน: {current_stock_reset}")
+
+if st.sidebar.button("🔁 รีเซ็ต Stock"):
+    # 1) อัปเดตค่าใน DataFrame
+    df_items.loc[
+        df_items["Item_Name"] == selected_reset_item,
+        "Current_Stock"
+    ] = base_stock_reset
+
+    # 2) เตรียม DataFrame สำหรับเซฟกลับ CSV
+    df_items_out = df_items.copy()
+    df_items_out["EXP_Date"] = pd.to_datetime(
+        df_items_out["EXP_Date"]
+    ).dt.strftime("%d/%m/%Y")
+
+    temp_file = DATA_FILE.replace(".csv", "_temp.csv")
+
+    try:
+        # เขียนไฟล์ชั่วคราว
+        df_items_out.to_csv(
+            temp_file,
+            index=False,
+            encoding="utf-8-sig"
+        )
+
+        # แทนที่ไฟล์จริง
+        os.replace(temp_file, DATA_FILE)
+
+        st.sidebar.success(
+            f"✅ รีเซ็ต Stock ของ '{selected_reset_item}' เป็น {base_stock_reset} แล้ว"
+        )
+        st.rerun()
+
+    except PermissionError:
+        st.sidebar.error("❌ ไม่สามารถบันทึกไฟล์ได้ (ไฟล์อาจถูกเปิดใน Excel อยู่)")
+
+    except Exception as e:
+        st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกไฟล์: {e}")
+
+
+# สร้างไฟล์ Excel ในหน่วยความจำ
+output = BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df_display[cols_to_show].to_excel(
+        writer,
+        index=False,
+        sheet_name="Emergency Cart"
+    )
+
+excel_data = output.getvalue()
+
+st.download_button(
+    label="⬇️ ดาวน์โหลดรายการเป็น Excel",
+    data=excel_data,
+    file_name="emergency_cart_check.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
