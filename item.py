@@ -416,12 +416,53 @@ def _migrate_csv_to_db_if_needed() -> None:
             ],
         )
         conn.commit()
-
+def _seed_emergency_cart_if_empty() -> None:
+    """เพิ่มข้อมูล Emergency Cart ตัวอย่างถ้า database ว่าง"""
+    with _get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        if count > 0:
+            return  # มีข้อมูลแล้ว ไม่ต้องเพิ่ม
+        
+        print("📦 กำลังเพิ่มข้อมูล Emergency Cart ตัวอย่าง...")
+        
+        # ข้อมูลตัวอย่าง 15 รายการ
+        demo_items = [
+            # CPR Bundle
+            ("Adrenaline 1mg/ml 1ml", 10, 10, "2026-12-31", "cpr"),
+            ("Atropine 0.6mg/ml 1ml", 10, 9, "2026-08-15", "cpr"),
+            ("Amiodarone 150mg/3ml", 5, 5, "2026-10-20", "cpr"),
+            ("Lidocaine 100mg/5ml", 5, 4, "2026-11-30", "cpr"),
+            
+            # Airway Bundle
+            ("ETT 6.5", 2, 2, "2027-03-15", "airway"),
+            ("ETT 7.0", 2, 2, "2027-03-15", "airway"),
+            ("ETT 7.5", 2, 1, "2027-03-15", "airway"),
+            ("ETT 8.0", 2, 2, "2027-03-15", "airway"),
+            ("Laryngoscope blade", 3, 3, "2028-01-01", "airway"),
+            
+            # IV Fluid Bundle
+            ("NSS 1000ml", 20, 18, "2026-09-30", "iv"),
+            ("NSS 500ml", 10, 8, "2026-09-30", "iv"),
+            ("RL 1000ml", 10, 10, "2026-11-20", "iv"),
+            ("D5W 1000ml", 5, 5, "2026-07-15", "iv"),
+            ("IV Cannula 18G", 20, 15, "2027-06-30", "iv"),
+            ("IV Cannula 20G", 20, 18, "2027-06-30", "iv"),
+        ]
+        
+        conn.executemany(
+            """
+            INSERT INTO items (item_name, stock, current_stock, exp_date, bundle)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            demo_items
+        )
+        conn.commit()
+        print("✅ เพิ่มข้อมูลตัวอย่าง 15 รายการเรียบร้อย")
 
 def load_items() -> pd.DataFrame:
     _init_db()
     _migrate_csv_to_db_if_needed()
-
+    _seed_emergency_cart_if_empty()
     with _get_conn() as conn:
         df = pd.read_sql_query(
             """
