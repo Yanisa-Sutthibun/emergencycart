@@ -332,32 +332,34 @@ check_password()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _resolve_db_file(filename: str) -> str:
-    """Resolve DB path robustly across different run locations.
+    """Resolve DB path deterministically to avoid accidentally creating/using the wrong DB.
 
     Priority:
-    1) Environment variable (if set): EMERGENCY_CART_DB_PATH
-    2) Same folder as this script (BASE_DIR)
-    3) Current working directory (os.getcwd())
-    4) One level up from BASE_DIR / CWD (useful when running from subfolders)
-    If none exist, default to BASE_DIR/filename (SQLite will create it).
+    1) Streamlit secrets: st.secrets["EMERGENCY_CART_DB_PATH"] (best for Streamlit Cloud)
+    2) Environment variable: EMERGENCY_CART_DB_PATH
+    3) Same folder as this script (BASE_DIR)
+
+    Notes:
+    - We intentionally DO NOT fall back to os.getcwd() or parent folders because that can
+      silently point to a different DB and then trigger demo seeding / wrong data.
+    - If the resolved file does not exist yet, SQLite will create it at that path.
     """
+    # 1) Streamlit secrets (Streamlit Cloud-friendly)
+    try:
+        secret = st.secrets.get("EMERGENCY_CART_DB_PATH", "")
+        if isinstance(secret, str) and secret.strip():
+            return secret.strip()
+    except Exception:
+        pass
+
+    # 2) Environment variable
     env = os.environ.get("EMERGENCY_CART_DB_PATH", "").strip()
     if env:
         return env
 
-    candidates = [
-        os.path.join(BASE_DIR, filename),
-        os.path.join(os.getcwd(), filename),
-        os.path.join(os.path.dirname(BASE_DIR), filename),
-        os.path.join(os.path.dirname(os.getcwd()), filename),
-    ]
-    for c in candidates:
-        try:
-            if os.path.exists(c):
-                return c
-        except Exception:
-            pass
+    # 3) Default: same folder as this script (repo folder on Streamlit Cloud: /mount/src/<repo>/)
     return os.path.join(BASE_DIR, filename)
+
 
 DB_FILE = _resolve_db_file("item_orm.db")
 LEGACY_CSV = os.path.join(BASE_DIR, "item_ORM.csv")
@@ -445,31 +447,39 @@ def _migrate_csv_to_db_if_needed() -> None:
             ],
         )
         conn.commit()
-def _seed_emergency_cart_if_empty() -> None:
-    """เพิ่มข้อมูล Emergency Cart ตัวอย่างถ้า database ว่าง"""
+
+def _seed_emergency_cart_if_empty_if_enabled() -> None:
+    """OPTIONAL demo data seeding (disabled by default).
+
+    To enable (ONLY for local demo/testing), set either:
+    - st.secrets["ALLOW_DEMO_SEED"] = "true"
+    - or environment variable ALLOW_DEMO_SEED=true
+    """
+    allow = False
+    try:
+        allow = str(st.secrets.get("ALLOW_DEMO_SEED", "")).strip().lower() in ("1", "true", "yes", "y")
+    except Exception:
+        pass
+    if not allow:
+        allow = os.environ.get("ALLOW_DEMO_SEED", "").strip().lower() in ("1", "true", "yes", "y")
+    if not allow:
+        return
+
     with _get_conn() as conn:
         count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         if count > 0:
-            return  # มีข้อมูลแล้ว ไม่ต้องเพิ่ม
-        
-        print("📦 กำลังเพิ่มข้อมูล Emergency Cart ตัวอย่าง...")
-        
-        # ข้อมูลตัวอย่าง 15 รายการ
+            return
+
         demo_items = [
-            # CPR Bundle
             ("Adrenaline 1mg/ml 1ml", 10, 10, "2026-12-31", "cpr"),
             ("Atropine 0.6mg/ml 1ml", 10, 9, "2026-08-15", "cpr"),
             ("Amiodarone 150mg/3ml", 5, 5, "2026-10-20", "cpr"),
             ("Lidocaine 100mg/5ml", 5, 4, "2026-11-30", "cpr"),
-            
-            # Airway Bundle
             ("ETT 6.5", 2, 2, "2027-03-15", "airway"),
             ("ETT 7.0", 2, 2, "2027-03-15", "airway"),
             ("ETT 7.5", 2, 1, "2027-03-15", "airway"),
             ("ETT 8.0", 2, 2, "2027-03-15", "airway"),
             ("Laryngoscope blade", 3, 3, "2028-01-01", "airway"),
-            
-            # IV Fluid Bundle
             ("NSS 1000ml", 20, 18, "2026-09-30", "iv"),
             ("NSS 500ml", 10, 8, "2026-09-30", "iv"),
             ("RL 1000ml", 10, 10, "2026-11-20", "iv"),
@@ -477,21 +487,20 @@ def _seed_emergency_cart_if_empty() -> None:
             ("IV Cannula 18G", 20, 15, "2027-06-30", "iv"),
             ("IV Cannula 20G", 20, 18, "2027-06-30", "iv"),
         ]
-        
+
         conn.executemany(
             """
             INSERT INTO items (item_name, stock, current_stock, exp_date, bundle)
             VALUES (?, ?, ?, ?, ?)
             """,
-            demo_items
+            demo_items,
         )
         conn.commit()
-        print("✅ เพิ่มข้อมูลตัวอย่าง 15 รายการเรียบร้อย")
 
 def load_items() -> pd.DataFrame:
     _init_db()
     _migrate_csv_to_db_if_needed()
-    _seed_emergency_cart_if_empty()
+    _seed_emergency_cart_if_empty_if_enabled()
     with _get_conn() as conn:
         df = pd.read_sql_query(
             """
@@ -1259,6 +1268,9 @@ def make_alert_excel(sheets: list[tuple[str, pd.DataFrame]]) -> bytes:
 st.sidebar.title("📌 เมนูหลัก")
 
 st.sidebar.caption(f"🗄️ DB (Emergency Cart): {os.path.basename(DB_FILE)}")
+if not os.path.exists(DB_FILE):
+    st.sidebar.warning("⚠️ ยังไม่พบไฟล์ DB ตาม path นี้ (ระบบจะสร้างไฟล์ใหม่ที่นี่เมื่อเริ่มบันทึก)")
+
 with st.sidebar.expander("ℹ️ DB path (สำหรับ debug)", expanded=False):
     st.code(DB_FILE)
     st.write("มีไฟล์อยู่ไหม:", os.path.exists(DB_FILE))
