@@ -1,16 +1,15 @@
-# item_ipad_pro.py - Emergency Cart Checklist (iPad-friendly UI)
+# item_ipad_pro.py - Emergency Cart Checklist + Equipment Daily Check (iPad-friendly UI)
 # Notes:
-# - Uses CSV as the single source of truth (writes back to item_ORM.csv in the same folder).
-# - Adds EXP alerts (≤30d) + ETT exchange alerts (Exchange due = EXP - 24 months; alert 30d before due).
-# - iPad-friendly: fewer columns, bigger typography, sticky-ish sidebar summary, forms to avoid multi-click.
-#fix ipad ui + status badge
-#แก้ error ตรงที่ download
+# - Emergency Cart: Uses CSV/SQLite as source
+# - Equipment Check: Uses separate SQLite tables
+# - iPad-friendly: bigger typography, forms, sticky sidebar
+# Version: 2.0 - Added Equipment Daily Check System
 
 import os
 import io
 import hmac
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -47,8 +46,6 @@ def bundle_status_block(df: pd.DataFrame, warn_days: int = 30) -> None:
         "airway": {"icon": "🫁", "name": "Airway Management"},
         "iv":     {"icon": "💧", "name": "Fluid Management"},
         "cpr":    {"icon": "❤️‍🩹", "name": "CPR Kit"},
-        # เพิ่มได้เรื่อยๆ เช่น:
-        # "bleeding": {"icon": "🩸", "name": "Bleeding Control"},
     }
 
     # ---------- Styling ----------
@@ -112,7 +109,6 @@ def bundle_status_block(df: pd.DataFrame, warn_days: int = 30) -> None:
         }
 
     # ---------- Layout: responsive columns ----------
-    # iPad แนวนอน: 2 การ์ด/แถวสวยสุด
     cols = st.columns(2)
 
     # group ตาม Bundle
@@ -184,7 +180,7 @@ def bundle_status_block(df: pd.DataFrame, warn_days: int = 30) -> None:
 # 0) APP CONFIG + STYLE
 # ==============================
 st.set_page_config(
-    page_title="Emergency Cart Checklist",
+    page_title="Emergency Cart & Equipment Check",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -233,6 +229,57 @@ section[data-testid="stSidebar"] .stMarkdown { font-size: 0.98rem; }
 .badge.green { background:#e7ffe7; border-color:#b7f0b7; }
 .badge.gray { background:#f3f4f6; border-color:#e5e7eb; }
 
+/* Equipment status badges */
+.status-badge {
+    display: inline-block;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin: 4px;
+}
+.badge-ready { background: #d3f9d8; color: #2b8a3e; border: 2px solid #51cf66; }
+.badge-not-ready { background: #ffe0e0; color: #c92a2a; border: 2px solid #ff6b6b; }
+.badge-borrowed { background: #e0f2ff; color: #1971c2; border: 2px solid #4dabf7; }
+.badge-maintenance { background: #fff3bf; color: #e67700; border: 2px solid #fab005; }
+
+/* Metric cards for equipment */
+.metric-card {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 16px;
+    padding: 20px;
+    color: white;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.metric-card h3 { color: white; margin: 0; font-size: 2.5rem; }
+.metric-card p { margin: 4px 0 0 0; opacity: 0.95; font-size: 0.95rem; }
+
+.metric-card.green {
+    background: linear-gradient(135deg, #51cf66 0%, #2b8a3e 100%);
+}
+.metric-card.blue {
+    background: linear-gradient(135deg, #4dabf7 0%, #1971c2 100%);
+}
+.metric-card.red {
+    background: linear-gradient(135deg, #ff6b6b 0%, #c92a2a 100%);
+}
+
+/* Equipment card styling */
+.equipment-card {
+    background: white;
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: all 0.3s;
+}
+.equipment-card:hover {
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    transform: translateY(-2px);
+}
+
 /* Dataframe header sticky-ish (best effort) */
 div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
 
@@ -245,13 +292,11 @@ footer {visibility: hidden;}
 """,
     unsafe_allow_html=True,
 )
-
-
 # ==============================
 # 1) SIMPLE PASSWORD GATE
 # ==============================
 def check_password() -> None:
-    """Sidebar password gate using st.secrets['APP_PASSWORD']."""
+    """Sidebar password gate with customizable password"""
     if "auth" not in st.session_state:
         st.session_state["auth"] = False
 
@@ -260,10 +305,18 @@ def check_password() -> None:
 
     st.sidebar.header("🔐 Login")
     pw = st.sidebar.text_input("Password", type="password")
+    
+    # 🔑 เปลี่ยนรหัสผ่านตรงนี้
+    YOUR_PASSWORD = "muke"  # ⬅️ เปลี่ยนรหัสตรงนี้
 
     if st.sidebar.button("Login"):
-        secret = st.secrets.get("APP_PASSWORD", "")
-        if secret and hmac.compare_digest(pw, secret):
+        # ลองอ่าน password จาก secrets ก่อน (สำหรับ Streamlit Cloud)
+        try:
+            secret = st.secrets.get("APP_PASSWORD", YOUR_PASSWORD)
+        except:
+            secret = YOUR_PASSWORD  # ใช้รหัสที่ตั้งไว้
+        
+        if hmac.compare_digest(pw, secret):
             st.session_state["auth"] = True
             st.rerun()
         else:
@@ -271,13 +324,10 @@ def check_password() -> None:
 
     st.stop()
 
-
 check_password()
 
-
-
 # ==============================
-# 2) LOAD + SAVE HELPERS (SQLite)
+# 2) LOAD + SAVE HELPERS (SQLite) - EMERGENCY CART
 # ==============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "item_orm.db")
@@ -442,8 +492,580 @@ def db_reset_stock(item_name: str) -> int:
 
     return base
 
+
 # ==============================
-# 3) PREPARE DATA
+# 3) EQUIPMENT DAILY CHECK - DATABASE FUNCTIONS
+# ==============================
+EQUIPMENT_DB = os.path.join(BASE_DIR, "equipment_daily.db")
+
+def get_equipment_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(EQUIPMENT_DB, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+def init_equipment_db() -> None:
+    with get_equipment_conn() as conn:
+        # เปิด foreign key support
+        conn.execute("PRAGMA foreign_keys = ON;")
+        
+        # ตารางเครื่องมือหลัก
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equipment (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                pgh_code TEXT,
+                serial_number TEXT,
+                last_maintenance_date TEXT,
+                maintenance_note TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        
+        # ตารางบันทึกการตรวจสอบรายวัน - ไม่ใช้ FOREIGN KEY
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                equipment_id INTEGER NOT NULL,
+                check_date TEXT NOT NULL,
+                check_time TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('พร้อมใช้', 'ไม่พร้อมใช้', 'วอร์ดอื่นยืม', 'รอซ่อม')),
+                borrowed_to TEXT,
+                remark TEXT,
+                checked_by TEXT
+            )
+            """
+        )
+        
+        conn.commit()
+
+def seed_initial_equipment() -> None:
+    """เพิ่มรายการเครื่องมืออุปกรณ์เริ่มต้นถ้ายังไม่มีข้อมูล"""
+    init_equipment_db()
+    
+    with get_equipment_conn() as conn:
+        # ตรวจสอบว่ามีข้อมูลแล้วหรือยัง
+        count = conn.execute("SELECT COUNT(*) FROM equipment").fetchone()[0]
+        if count > 0:
+            return  # มีข้อมูลแล้ว ไม่ต้อง seed
+        
+        # รายการเครื่องมือทั้งหมด (ปรับชื่อให้ไม่ซ้ำกัน)
+        equipment_list = [
+            ("Enerjet", "pgh0853", "AD0115154"),
+            ("CO2 laser Sharplan", "pgh0882", "33-121"),
+            ("Q-switch laser", "pgh0883", "LO-3ND"),
+            ("Smaz", "pgh0884", "MAZ 0360012954"),
+            ("Scarlet", "pgh0885", "SLSNC 00547 H"),
+            ("เครื่องดูดควัน Ellman (pgh0888)", "pgh0888", "01453597"),
+            ("Koolio", "pgh5519", "KOO-210034"),
+            ("CO2 laser Uti", "pgh5520", "1N140331-01"),
+            ("Emsculpt", "pgh5521", "799028002935"),
+            ("Cooltech", "pgh5522", "2000000399-10018"),
+            ("Morpheus pro", "-", "R10420307"),
+            ("Primaled", "pgh3057", "1683"),
+            ("Siui cts-415a", "pgh5525", "ไม่สามารถระบุได้"),
+            ("Sonoscope", "pgh5526", "0261017160"),
+            ("Gomco", "pgh2386", "1115"),
+            ("Covidien", "pgh0821", "S4J15048AX"),
+            ("เครื่องดูดควัน Ellman (pgh4748)", "pgh4748", "04153495"),
+            ("Erbe", "pgh2386", "11418045"),
+            ("Valleylab", "pgh0818", "FOF10138T"),
+            ("Old Ellman surgitron", "pgh0819", "166979"),
+            ("New Ellman surgitron", "pgh0822", "2915WA"),
+            ("เครื่องดูดควัน Ellman (pgh0847)", "pgh0847", "04153493"),
+        ]
+        
+        # Insert ทั้งหมด
+        conn.executemany(
+            "INSERT INTO equipment (name, pgh_code, serial_number) VALUES (?, ?, ?)",
+            equipment_list
+        )
+        conn.commit()
+
+def load_equipment() -> pd.DataFrame:
+    init_equipment_db()
+    seed_initial_equipment()  # เพิ่มบรรทัดนี้ - จะ seed ครั้งเดียวถ้ายังไม่มีข้อมูล
+    with get_equipment_conn() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT 
+                id,
+                name,
+                pgh_code,
+                serial_number,
+                last_maintenance_date,
+                maintenance_note
+            FROM equipment
+            ORDER BY name
+            """,
+            conn,
+        )
+    return df
+
+def add_equipment(name: str, pgh: str, sn: str) -> None:
+    init_equipment_db()  # เพิ่มบรรทัดนี้
+    with get_equipment_conn() as conn:
+        conn.execute(
+            "INSERT INTO equipment (name, pgh_code, serial_number) VALUES (?, ?, ?)",
+            (name.strip(), pgh.strip(), sn.strip()),
+        )
+        conn.commit()
+
+def delete_equipment(equipment_id: int) -> None:
+    init_equipment_db()  # เพิ่มบรรทัดนี้
+    with get_equipment_conn() as conn:
+        conn.execute("DELETE FROM equipment WHERE id=?", (equipment_id,))
+        conn.commit()
+
+def update_maintenance(equipment_id: int, maint_date: date, note: str) -> None:
+    init_equipment_db()  # เพิ่มบรรทัดนี้
+    with get_equipment_conn() as conn:
+        conn.execute(
+            "UPDATE equipment SET last_maintenance_date=?, maintenance_note=? WHERE id=?",
+            (maint_date.isoformat(), note.strip() if note else None, equipment_id),
+        )
+        conn.commit()
+
+def add_daily_check(equipment_id: int, status: str, borrowed_to: str, remark: str, checked_by: str) -> None:
+    init_equipment_db()  # เพิ่มบรรทัดนี้
+    now = datetime.now()
+    check_date = now.date().isoformat()
+    check_time = now.strftime("%H:%M:%S")
+    
+    with get_equipment_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO daily_checks 
+            (equipment_id, check_date, check_time, status, borrowed_to, remark, checked_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                equipment_id,
+                check_date,
+                check_time,
+                status,
+                borrowed_to.strip() if borrowed_to else None,
+                remark.strip() if remark else None,
+                checked_by.strip() if checked_by else None,
+            ),
+        )
+        conn.commit()
+
+def get_daily_checks(start_date: date, end_date: date) -> pd.DataFrame:
+    init_equipment_db()  # เพิ่มบรรทัดนี้
+    with get_equipment_conn() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT 
+                e.name as equipment_name,
+                e.pgh_code,
+                e.serial_number,
+                dc.check_date,
+                dc.check_time,
+                dc.status,
+                dc.borrowed_to,
+                dc.remark,
+                dc.checked_by
+            FROM daily_checks dc
+            JOIN equipment e ON dc.equipment_id = e.id
+            WHERE dc.check_date BETWEEN ? AND ?
+            ORDER BY dc.check_date DESC, dc.check_time DESC
+            """,
+            conn,
+            params=(start_date.isoformat(), end_date.isoformat()),
+        )
+    return df
+
+def get_latest_status() -> pd.DataFrame:
+    """ดึงสถานะล่าสุดของแต่ละเครื่อง"""
+    init_equipment_db()
+    with get_equipment_conn() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT 
+                e.id,
+                e.name,
+                e.pgh_code,
+                e.serial_number,
+                e.last_maintenance_date,
+                dc.check_date,
+                dc.status,
+                dc.borrowed_to,
+                dc.remark
+            FROM equipment e
+            LEFT JOIN (
+                SELECT equipment_id, check_date, status, borrowed_to, remark
+                FROM daily_checks
+                WHERE id IN (
+                    SELECT MAX(id)
+                    FROM daily_checks
+                    GROUP BY equipment_id
+                )
+            ) dc ON e.id = dc.equipment_id
+            ORDER BY e.name
+            """,
+            conn,
+        )
+    return df
+
+# ==============================
+# 4) EQUIPMENT UI HELPERS
+# ==============================
+def status_badge_html(status: str) -> str:
+    badges = {
+        "พร้อมใช้": "badge-ready",
+        "ไม่พร้อมใช้": "badge-not-ready",
+        "วอร์ดอื่นยืม": "badge-borrowed",
+        "รอซ่อม": "badge-not-ready",
+    }
+    badge_class = badges.get(status, "")
+    icon = "✅" if status == "พร้อมใช้" else "❌" if status == "รอซ่อม" else "📤" if status == "วอร์ดอื่นยืม" else "⚠️"
+    return f'<span class="status-badge {badge_class}">{icon} {status}</span>'
+
+# ==============================
+# 5) EQUIPMENT PAGES
+# ==============================
+def equipment_dashboard_page() -> None:
+    st.title("📊 Dashboard - เครื่องมืออุปกรณ์")
+    
+    df_equipment = load_equipment()
+    df_status = get_latest_status()
+    
+    # แสดงข้อความถ้ามีการ import ข้อมูลเริ่มต้น
+    if len(df_equipment) == 22 and len(df_status[df_status["status"].notna()]) == 0:
+        st.info("✅ โหลดรายการเครื่องมือ 22 รายการเรียบร้อยแล้ว เริ่มตรวจสอบรายวันได้เลย")
+    
+    # Metrics
+    total = len(df_equipment)
+    ready = len(df_status[df_status["status"] == "พร้อมใช้"])
+    borrowed = len(df_status[df_status["status"] == "วอร์ดอื่นยืม"])
+    not_ready = len(df_status[df_status["status"].isin(["ไม่พร้อมใช้", "รอซ่อม"])])
+    
+    c1, c2, c3, c4 = st.columns(4)
+    
+    with c1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <h3>{total}</h3>
+                <p>เครื่องมือทั้งหมด</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    
+    with c2:
+        st.markdown(
+            f"""
+            <div class="metric-card green">
+                <h3>{ready}</h3>
+                <p>✅ พร้อมใช้</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    
+    with c3:
+        st.markdown(
+            f"""
+            <div class="metric-card blue">
+                <h3>{borrowed}</h3>
+                <p>📤 วอร์ดอื่นยืม</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    
+    with c4:
+        st.markdown(
+            f"""
+            <div class="metric-card red">
+                <h3>{not_ready}</h3>
+                <p>❌ ไม่พร้อมใช้</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    
+    st.divider()
+    
+    # สถานะปัจจุบัน
+    st.subheader("📋 สถานะปัจจุบันของเครื่องมือ")
+    
+    if df_status.empty:
+        st.info("ยังไม่มีข้อมูลการตรวจสอบ")
+    else:
+        for _, row in df_status.iterrows():
+            st.markdown('<div class="equipment-card">', unsafe_allow_html=True)
+            
+            col1, col2, col3 = st.columns([3, 2, 2])
+            
+            with col1:
+                st.markdown(f"**{row['name']}**")
+                st.caption(f"PGH: {row['pgh_code']} | SN: {row['serial_number']}")
+            
+            with col2:
+                if pd.notna(row['status']):
+                    st.markdown(status_badge_html(row['status']), unsafe_allow_html=True)
+                    if row['status'] == "วอร์ดอื่นยืม" and pd.notna(row['borrowed_to']):
+                        st.caption(f"ยืมไป: {row['borrowed_to']}")
+                else:
+                    st.markdown('<span class="status-badge badge-gray">ยังไม่ได้ตรวจสอบ</span>', unsafe_allow_html=True)
+            
+            with col3:
+                if pd.notna(row['last_maintenance_date']):
+                    maint_date = pd.to_datetime(row['last_maintenance_date']).date()
+                    days_since = (date.today() - maint_date).days
+                    st.caption(f"🔧 Maintenance ล่าสุด:")
+                    st.caption(f"{maint_date.strftime('%d/%m/%Y')} ({days_since} วันที่แล้ว)")
+            
+            if pd.notna(row['remark']) and row['remark']:
+                st.caption(f"💬 หมายเหตุ: {row['remark']}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+
+def equipment_daily_check_page() -> None:
+    st.title("✅ ตรวจสอบรายวัน")
+    st.caption(f"วันที่: {date.today().strftime('%d/%m/%Y')}")
+    
+    df_equipment = load_equipment()
+    
+    if df_equipment.empty:
+        st.warning("⚠️ ยังไม่มีเครื่องมือในระบบ กรุณาเพิ่มเครื่องมือในหน้า 'จัดการเครื่องมือ' ก่อน")
+        return
+    
+    st.divider()
+    st.info(f"📋 เครื่องมือทั้งหมด {len(df_equipment)} รายการ - เลือกสถานะแล้วกดบันทึกได้เลย")
+    
+    # แสดงเครื่องมือทั้งหมดพร้อมฟอร์มในหน้าเดียว
+    for idx, equipment in df_equipment.iterrows():
+        with st.container():
+            st.markdown('<div class="equipment-card">', unsafe_allow_html=True)
+            
+            # Header
+            col_name, col_action = st.columns([3, 1])
+            with col_name:
+                st.markdown(f"### {equipment['name']}")
+                st.caption(f"PGH: {equipment['pgh_code']} | SN: {equipment['serial_number']}")
+            
+            # Form สำหรับเครื่องนี้
+            with st.form(key=f"form_{equipment['id']}"):
+                col1, col2, col3 = st.columns([2, 2, 1])
+                
+                with col1:
+                    status = st.radio(
+                        "สถานะ",
+                        ["พร้อมใช้", "ไม่พร้อมใช้", "วอร์ดอื่นยืม", "รอซ่อม"],
+                        key=f"status_{equipment['id']}",
+                        horizontal=True,
+                        index=0
+                    )
+                
+                with col2:
+                    if status == "วอร์ดอื่นยืม":
+                        borrowed_to = st.text_input("ยืมไปที่", key=f"borrowed_{equipment['id']}")
+                    else:
+                        borrowed_to = ""
+                    
+                    remark = st.text_input("หมายเหตุ", key=f"remark_{equipment['id']}")
+                
+                with col3:
+                    st.write("")  # spacer
+                    st.write("")  # spacer
+                    submitted = st.form_submit_button("💾 บันทึก", use_container_width=True, type="primary")
+                
+                if submitted:
+                    try:
+                        add_daily_check(int(equipment['id']), status, borrowed_to, remark, "System")
+                        st.success(f"✅ บันทึก '{equipment['name']}' เรียบร้อย")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ ผิดพลาด: {e}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.divider()
+
+def equipment_manage_page() -> None:
+    st.title("⚙️ จัดการเครื่องมือ")
+    
+    tab1, tab2, tab3 = st.tabs(["📝 เพิ่มเครื่องมือใหม่", "🔧 บันทึก Maintenance", "🗑️ ลบเครื่องมือ"])
+    
+    with tab1:
+        st.subheader("เพิ่มเครื่องมือใหม่")
+        
+        with st.form("add_equipment_form"):
+            name = st.text_input("ชื่อเครื่องมือ *", "")
+            pgh = st.text_input("รหัส PGH", "")
+            sn = st.text_input("Serial Number", "")
+            
+            submitted = st.form_submit_button("➕ เพิ่มเครื่องมือ", use_container_width=True)
+        
+        if submitted:
+            if not name.strip():
+                st.error("❌ กรุณาระบุชื่อเครื่องมือ")
+            else:
+                try:
+                    add_equipment(name, pgh, sn)
+                    st.success(f"✅ เพิ่มเครื่องมือ '{name}' เรียบร้อยแล้ว")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+        
+        st.divider()
+        st.subheader("รายการเครื่องมือทั้งหมด")
+        df = load_equipment()
+        if not df.empty:
+            st.dataframe(
+                df[["name", "pgh_code", "serial_number", "last_maintenance_date"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("ยังไม่มีเครื่องมือในระบบ")
+    
+    with tab2:
+        st.subheader("บันทึกวันที่บริษัทมา Maintenance")
+        
+        df_equipment = load_equipment()
+        
+        if df_equipment.empty:
+            st.info("ยังไม่มีเครื่องมือในระบบ")
+        else:
+            with st.form("maintenance_form"):
+                equipment_options = [f"{row['name']} (PGH: {row['pgh_code']})" for _, row in df_equipment.iterrows()]
+                selected_idx = st.selectbox("เลือกเครื่องมือ", range(len(equipment_options)), format_func=lambda x: equipment_options[x])
+                
+                maint_date = st.date_input("วันที่ Maintenance", date.today())
+                maint_note = st.text_area(
+                    "หมายเหตุ (บันทึกความผิดปกติหลังช่างมาดู หรือรายละเอียดการซ่อม)",
+                    "",
+                    height=120,
+                )
+                
+                submitted = st.form_submit_button("💾 บันทึก Maintenance", use_container_width=True)
+            
+            if submitted:
+                try:
+                    equipment_id = df_equipment.iloc[selected_idx]["id"]
+                    update_maintenance(equipment_id, maint_date, maint_note)
+                    st.success(f"✅ บันทึก Maintenance เรียบร้อยแล้ว")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+    
+    with tab3:
+        st.subheader("ลบเครื่องมือ")
+        st.warning("⚠️ การลบจะลบข้อมูลการตรวจสอบทั้งหมดของเครื่องนี้ด้วย")
+        
+        df_equipment = load_equipment()
+        
+        if df_equipment.empty:
+            st.info("ยังไม่มีเครื่องมือในระบบ")
+        else:
+            with st.form("delete_equipment_form"):
+                equipment_options = [f"{row['name']} (PGH: {row['pgh_code']})" for _, row in df_equipment.iterrows()]
+                selected_idx = st.selectbox("เลือกเครื่องมือที่จะลบ", range(len(equipment_options)), format_func=lambda x: equipment_options[x])
+                
+                confirm = st.checkbox("ยืนยันการลบ")
+                submitted = st.form_submit_button("🗑️ ลบเครื่องมือ", use_container_width=True, type="primary")
+            
+            if submitted:
+                if not confirm:
+                    st.error("❌ กรุณาเช็คยืนยันการลบ")
+                else:
+                    try:
+                        equipment_id = df_equipment.iloc[selected_idx]["id"]
+                        equipment_name = df_equipment.iloc[selected_idx]["name"]
+                        delete_equipment(equipment_id)
+                        st.success(f"✅ ลบเครื่องมือ '{equipment_name}' เรียบร้อยแล้ว")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+
+def equipment_report_page() -> None:
+    st.title("📄 รายงาน")
+    
+    # เลือกช่วงเวลา
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        start_date = st.date_input("วันที่เริ่มต้น", date.today().replace(day=1))
+    
+    with col2:
+        end_date = st.date_input("วันที่สิ้นสุด", date.today())
+    
+    if start_date > end_date:
+        st.error("❌ วันที่เริ่มต้นต้องน้อยกว่าหรือเท่ากับวันที่สิ้นสุด")
+        return
+    
+    df_checks = get_daily_checks(start_date, end_date)
+    
+    st.divider()
+    
+    if df_checks.empty:
+        st.info(f"ไม่มีข้อมูลการตรวจสอบในช่วง {start_date.strftime('%d/%m/%Y')} ถึง {end_date.strftime('%d/%m/%Y')}")
+    else:
+        st.subheader(f"📊 สรุปการตรวจสอบ ({start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')})")
+        
+        # สถิติ
+        total_checks = len(df_checks)
+        ready_count = len(df_checks[df_checks["status"] == "พร้อมใช้"])
+        ready_pct = (ready_count / total_checks * 100) if total_checks > 0 else 0
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("จำนวนครั้งที่ตรวจสอบ", total_checks)
+        m2.metric("พร้อมใช้", ready_count)
+        m3.metric("% พร้อมใช้", f"{ready_pct:.1f}%")
+        
+        st.divider()
+        
+        # แสดงตาราง
+        st.subheader("📋 รายละเอียดการตรวจสอบ")
+        
+        # จัดรูปแบบวันที่
+        df_display = df_checks.copy()
+        df_display["check_date"] = pd.to_datetime(df_display["check_date"]).dt.strftime("%d/%m/%Y")
+        
+        # ไม่แสดงคอลัมน์ checked_by
+        display_cols = [
+            "equipment_name",
+            "pgh_code",
+            "check_date",
+            "check_time",
+            "status",
+            "borrowed_to",
+            "remark",
+        ]
+        
+        st.dataframe(
+            df_display[display_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+        
+        # Export
+        st.divider()
+        st.subheader("⬇️ ดาวน์โหลดรายงาน")
+        
+        # สร้าง Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_display[display_cols].to_excel(writer, sheet_name="Daily_Checks", index=False)
+        output.seek(0)
+        excel_data = output.getvalue()
+        
+        st.download_button(
+            "📥 ดาวน์โหลด Excel",
+            data=excel_data,
+            file_name=f"รายงานตรวจสอบเครื่องมือ_{start_date}_{end_date}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+# ==============================
+# 6) PREPARE DATA - EMERGENCY CART
 # ==============================
 df_items = load_items()
 
@@ -454,7 +1076,7 @@ for col in ["Item_Name", "Stock", "Current_Stock", "EXP_Date"]:
         st.stop()
 
 # Parse EXP_Date (accept both dd/mm/YYYY and YYYY-mm-dd)
-exp_ts = pd.to_datetime(df_items["EXP_Date"], errors="coerce", dayfirst=True)
+exp_ts = pd.to_datetime(df_items["EXP_Date"], errors="coerce", format="mixed", dayfirst=True)
 df_items["EXP_Date_ts"] = exp_ts
 
 today = pd.Timestamp.today().normalize()
@@ -480,7 +1102,7 @@ df_sorted = df_items.sort_values(["EXP_Date_ts", "Item_Name"], na_position="last
 
 
 # ==============================
-# 4) UI HELPERS
+# 7) UI HELPERS - EMERGENCY CART
 # ==============================
 def badge_for_row(row: pd.Series) -> str:
     """Return a compact, iPad-friendly status label (no HTML)."""
@@ -562,111 +1184,129 @@ def make_alert_excel(sheets: list[tuple[str, pd.DataFrame]]) -> bytes:
 
 
 # ==============================
-# 5) SIDEBAR NAV + SINGLE ITEM PANEL
+# 8) SIDEBAR NAV + SINGLE ITEM PANEL - EMERGENCY CART
 # ==============================
-st.sidebar.title("📌 เมนู")
-page = st.sidebar.radio("ไปที่หน้า", ["Dashboard", "⏰ Alerts (≤30 วัน + ETT)"], index=0)
+st.sidebar.title("📌 เมนูหลัก")
 
-st.sidebar.divider()
-st.sidebar.subheader("🎯 เลือกอุปกรณ์ (เลือกครั้งเดียว)")
+# Main navigation
+main_page = st.sidebar.radio(
+    "เลือกระบบ",
+    ["🚑 Emergency Cart", "🔧 เครื่องมืออุปกรณ์"],
+    index=0,
+)
 
-item_names = df_sorted["Item_Name"].dropna().astype(str).unique().tolist()
-default_idx = 0 if item_names else None
+if main_page == "🚑 Emergency Cart":
+    st.sidebar.divider()
+    page = st.sidebar.radio("ไปที่หน้า", ["Dashboard", "⏰ Alerts (≤30 วัน + ETT)"], index=0)
 
-selected_item = st.sidebar.selectbox("อุปกรณ์", item_names, index=default_idx)
+    st.sidebar.divider()
+    st.sidebar.subheader("🎯 เลือกอุปกรณ์ (เลือกครั้งเดียว)")
 
-sel_row = df_sorted[df_sorted["Item_Name"] == selected_item].iloc[0] if selected_item else None
+    item_names = df_sorted["Item_Name"].dropna().astype(str).unique().tolist()
+    default_idx = 0 if item_names else None
 
-if sel_row is not None:
-    exp = sel_row.get("EXP_Date", None)
-    days = sel_row.get("Days_to_Expire", None)
-    stock = sel_row.get("Stock", None)
-    cur = sel_row.get("Current_Stock", None)
+    selected_item = st.sidebar.selectbox("อุปกรณ์", item_names, index=default_idx)
 
-    st.sidebar.markdown('<div class="card">', unsafe_allow_html=True)
-    st.sidebar.markdown("**สรุปข้อมูล**")
-    st.sidebar.markdown(f"Item: **{selected_item}**")
-    st.sidebar.markdown(f"EXP: **{exp if pd.notna(exp) else '—'}**")
-    st.sidebar.markdown(f"Days to expire: **{int(days) if pd.notna(days) else '—'}**")
-    st.sidebar.markdown(f"Stock: **{cur} / {stock}**")
-    # ETT exchange info
-    if bool(sel_row.get("Is_ETT", False)):
-        ex_due = sel_row.get("Exchange_Due", None)
-        ex_days = sel_row.get("Days_to_Exchange", None)
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("**ETT Exchange**")
-        st.sidebar.markdown(f"Due: **{ex_due if pd.notna(ex_due) else '—'}**")
-        st.sidebar.markdown(f"Days to exchange: **{int(ex_days) if pd.notna(ex_days) else '—'}**")
-    st.sidebar.markdown('</div>', unsafe_allow_html=True)
+    sel_row = df_sorted[df_sorted["Item_Name"] == selected_item].iloc[0] if selected_item else None
 
-st.sidebar.divider()
+    if sel_row is not None:
+        exp = sel_row.get("EXP_Date", None)
+        days = sel_row.get("Days_to_Expire", None)
+        stock = sel_row.get("Stock", None)
+        cur = sel_row.get("Current_Stock", None)
 
-with st.sidebar.expander("🛠 แก้ไขวันหมดอายุ (EXP)", expanded=False):
-    if sel_row is None:
-        st.info("ยังไม่มีรายการ")
-    else:
-        old_exp = sel_row.get("EXP_Date", None)
-        if pd.isna(old_exp) or old_exp is None:
-            old_exp = date.today()
+        st.sidebar.markdown('<div class="card">', unsafe_allow_html=True)
+        st.sidebar.markdown("**สรุปข้อมูล**")
+        st.sidebar.markdown(f"Item: **{selected_item}**")
+        st.sidebar.markdown(f"EXP: **{exp if pd.notna(exp) else '—'}**")
+        st.sidebar.markdown(f"Days to expire: **{int(days) if pd.notna(days) else '—'}**")
+        st.sidebar.markdown(f"Stock: **{cur} / {stock}**")
+        # ETT exchange info
+        if bool(sel_row.get("Is_ETT", False)):
+            ex_due = sel_row.get("Exchange_Due", None)
+            ex_days = sel_row.get("Days_to_Exchange", None)
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**ETT Exchange**")
+            st.sidebar.markdown(f"Due: **{ex_due if pd.notna(ex_due) else '—'}**")
+            st.sidebar.markdown(f"Days to exchange: **{int(ex_days) if pd.notna(ex_days) else '—'}**")
+        st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
-        with st.form("form_edit_exp"):
-            new_exp = st.date_input("วันหมดอายุใหม่", value=pd.to_datetime(old_exp).date())
-            submitted = st.form_submit_button("💾 บันทึก EXP")
+    st.sidebar.divider()
 
-        if submitted:
-            try:
-                db_update_exp(selected_item, new_exp)
-                st.success("✅ บันทึกวันหมดอายุเรียบร้อยแล้ว")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ บันทึกไม่สำเร็จ: {e}")
+    with st.sidebar.expander("🛠 แก้ไขวันหมดอายุ (EXP)", expanded=False):
+        if sel_row is None:
+            st.info("ยังไม่มีรายการ")
+        else:
+            old_exp = sel_row.get("EXP_Date", None)
+            if pd.isna(old_exp) or old_exp is None:
+                old_exp = date.today()
 
+            with st.form("form_edit_exp"):
+                new_exp = st.date_input("วันหมดอายุใหม่", value=pd.to_datetime(old_exp).date())
+                submitted = st.form_submit_button("💾 บันทึก EXP")
 
-with st.sidebar.expander("📦 ใช้ของ / ตัด Stock", expanded=False):
-    if sel_row is None:
-        st.info("ยังไม่มีรายการ")
-    else:
-        # Re-pull from df_items (raw) to avoid stale value when sorted is old
-        row_now = df_items[df_items["Item_Name"] == selected_item].iloc[0]
-        base_stock = int(row_now.get("Stock", 0) or 0)
-        cur_stock = int(row_now.get("Current_Stock", 0) or 0)
-        st.write(f"Stock ปกติ: **{base_stock}** | คงเหลือ: **{cur_stock}**")
-
-        with st.form("form_cut_stock"):
-            qty_use = st.number_input("จำนวนที่ใช้", min_value=1, value=1, step=1)
-            cut = st.form_submit_button("✅ ตัด Stock")
-
-        if cut:
-            try:
-                db_cut_stock(selected_item, int(qty_use))
-                st.success(f"✅ ตัด Stock แล้ว | ใช้ไป {int(qty_use)} ชิ้น")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ ตัด Stock ไม่สำเร็จ: {e}")
+            if submitted:
+                try:
+                    db_update_exp(selected_item, new_exp)
+                    st.success("✅ บันทึกวันหมดอายุเรียบร้อยแล้ว")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ บันทึกไม่สำเร็จ: {e}")
 
 
-with st.sidebar.expander("🔄 รีเซ็ต Stock", expanded=False):
-    if sel_row is None:
-        st.info("ยังไม่มีรายการ")
-    else:
-        row_now = df_items[df_items["Item_Name"] == selected_item].iloc[0]
-        base_stock = int(row_now.get("Stock", 0) or 0)
-        cur_stock = int(row_now.get("Current_Stock", 0) or 0)
-        st.write(f"Stock ปกติ: **{base_stock}** | คงเหลือ: **{cur_stock}**")
+    with st.sidebar.expander("📦 ใช้ของ / ตัด Stock", expanded=False):
+        if sel_row is None:
+            st.info("ยังไม่มีรายการ")
+        else:
+            # Re-pull from df_items (raw) to avoid stale value when sorted is old
+            row_now = df_items[df_items["Item_Name"] == selected_item].iloc[0]
+            base_stock = int(row_now.get("Stock", 0) or 0)
+            cur_stock = int(row_now.get("Current_Stock", 0) or 0)
+            st.write(f"Stock ปกติ: **{base_stock}** | คงเหลือ: **{cur_stock}**")
 
-        with st.form("form_reset"):
-            ok = st.form_submit_button("🔁 รีเซ็ตเป็นค่า Stock ปกติ")
-        if ok:
-            try:
-                base = db_reset_stock(selected_item)
-                st.success(f"✅ รีเซ็ตแล้ว (Current_Stock = {base})")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ รีเซ็ตไม่สำเร็จ: {e}")
+            with st.form("form_cut_stock"):
+                qty_use = st.number_input("จำนวนที่ใช้", min_value=1, value=1, step=1)
+                cut = st.form_submit_button("✅ ตัด Stock")
+
+            if cut:
+                try:
+                    db_cut_stock(selected_item, int(qty_use))
+                    st.success(f"✅ ตัด Stock แล้ว | ใช้ไป {int(qty_use)} ชิ้น")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ ตัด Stock ไม่สำเร็จ: {e}")
+
+
+    with st.sidebar.expander("🔄 รีเซ็ต Stock", expanded=False):
+        if sel_row is None:
+            st.info("ยังไม่มีรายการ")
+        else:
+            row_now = df_items[df_items["Item_Name"] == selected_item].iloc[0]
+            base_stock = int(row_now.get("Stock", 0) or 0)
+            cur_stock = int(row_now.get("Current_Stock", 0) or 0)
+            st.write(f"Stock ปกติ: **{base_stock}** | คงเหลือ: **{cur_stock}**")
+
+            with st.form("form_reset"):
+                ok = st.form_submit_button("🔁 รีเซ็ตเป็นค่า Stock ปกติ")
+            if ok:
+                try:
+                    base = db_reset_stock(selected_item)
+                    st.success(f"✅ รีเซ็ตแล้ว (Current_Stock = {base})")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ รีเซ็ตไม่สำเร็จ: {e}")
+
+else:  # เครื่องมืออุปกรณ์
+    st.sidebar.divider()
+    equipment_page = st.sidebar.radio(
+        "เลือกหน้า",
+        ["📊 Dashboard", "✅ ตรวจสอบรายวัน", "⚙️ จัดการเครื่องมือ", "📄 รายงาน"],
+        index=0,
+    )
 
 
 # ==============================
-# 6) MAIN PAGES
+# 9) MAIN PAGES - EMERGENCY CART
 # ==============================
 def dashboard_page() -> None:
     st.title("📋 Emergency Cart Checklist")
@@ -801,18 +1441,30 @@ def alerts_page() -> None:
     )
 
     st.download_button(
-        "📥 ดาวน์โหลด Excel แจ้งเตือน",
+        "🔥 ดาวน์โหลด Excel แจ้งเตือน",
         data=xlsx,
         file_name="exp_alerts.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # ===============================
-    # 🏥 Bundle Status Dashboard
-    # ===============================
+    # Bundle Status Dashboard
     bundle_status_block(df_items, warn_days=30)
 
-if page == "Dashboard":
-    dashboard_page()
-else:
-    alerts_page()
+
+# ==============================
+# 10) MAIN ROUTING
+# ==============================
+if main_page == "🚑 Emergency Cart":
+    if page == "Dashboard":
+        dashboard_page()
+    else:
+        alerts_page()
+else:  # เครื่องมืออุปกรณ์
+    if equipment_page == "📊 Dashboard":
+        equipment_dashboard_page()
+    elif equipment_page == "✅ ตรวจสอบรายวัน":
+        equipment_daily_check_page()
+    elif equipment_page == "⚙️ จัดการเครื่องมือ":
+        equipment_manage_page()
+    elif equipment_page == "📄 รายงาน":
+        equipment_report_page()
