@@ -330,7 +330,36 @@ check_password()
 # 2) LOAD + SAVE HELPERS (SQLite) - EMERGENCY CART
 # ==============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "item_orm.db")
+
+def _resolve_db_file(filename: str) -> str:
+    """Resolve DB path robustly across different run locations.
+
+    Priority:
+    1) Environment variable (if set): EMERGENCY_CART_DB_PATH
+    2) Same folder as this script (BASE_DIR)
+    3) Current working directory (os.getcwd())
+    4) One level up from BASE_DIR / CWD (useful when running from subfolders)
+    If none exist, default to BASE_DIR/filename (SQLite will create it).
+    """
+    env = os.environ.get("EMERGENCY_CART_DB_PATH", "").strip()
+    if env:
+        return env
+
+    candidates = [
+        os.path.join(BASE_DIR, filename),
+        os.path.join(os.getcwd(), filename),
+        os.path.join(os.path.dirname(BASE_DIR), filename),
+        os.path.join(os.path.dirname(os.getcwd()), filename),
+    ]
+    for c in candidates:
+        try:
+            if os.path.exists(c):
+                return c
+        except Exception:
+            pass
+    return os.path.join(BASE_DIR, filename)
+
+DB_FILE = _resolve_db_file("item_orm.db")
 LEGACY_CSV = os.path.join(BASE_DIR, "item_ORM.csv")
 
 
@@ -1228,6 +1257,12 @@ def make_alert_excel(sheets: list[tuple[str, pd.DataFrame]]) -> bytes:
 # 8) SIDEBAR NAV + SINGLE ITEM PANEL - EMERGENCY CART
 # ==============================
 st.sidebar.title("📌 เมนูหลัก")
+
+st.sidebar.caption(f"🗄️ DB (Emergency Cart): {os.path.basename(DB_FILE)}")
+with st.sidebar.expander("ℹ️ DB path (สำหรับ debug)", expanded=False):
+    st.code(DB_FILE)
+    st.write("มีไฟล์อยู่ไหม:", os.path.exists(DB_FILE))
+
 
 # Main navigation
 main_page = st.sidebar.radio(
