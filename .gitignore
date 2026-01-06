@@ -6,3 +6,5 @@
 # python
 __pycache__/
 .env
+# allow this db (Emergency Cart)
+!item_orm.db
