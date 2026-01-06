@@ -1,0 +1,8 @@
+# database & data
+*.db
+*.sqlite
+*.csv
+
+# python
+__pycache__/
+.env
