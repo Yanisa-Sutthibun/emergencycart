@@ -9,6 +9,7 @@
 import os
 import io
 import hmac
+import sqlite3
 from datetime import date
 
 import pandas as pd
@@ -274,43 +275,182 @@ def check_password() -> None:
 check_password()
 
 
+
 # ==============================
-# 2) LOAD + SAVE HELPERS (CSV)
+# 2) LOAD + SAVE HELPERS (SQLite)
 # ==============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "item_ORM.csv")
+DB_FILE = os.path.join(BASE_DIR, "item_orm.db")
+LEGACY_CSV = os.path.join(BASE_DIR, "item_ORM.csv")
 
 
-def save_csv(df: pd.DataFrame) -> None:
-    """Atomic-ish save: write temp then replace."""
-    df_out = df.copy()
-
-    # Ensure EXP_Date saved as dd/mm/YYYY string (keep blank if NaT)
-    if "EXP_Date" in df_out.columns:
-        exp_dt = pd.to_datetime(df_out["EXP_Date"], errors="coerce")
-        df_out["EXP_Date"] = exp_dt.dt.strftime("%d/%m/%Y")
-
-    temp_file = DATA_FILE.replace(".csv", "_temp.csv")
-    df_out.to_csv(temp_file, index=False, encoding="utf-8-sig")
-    os.replace(temp_file, DATA_FILE)
+def _get_conn() -> sqlite3.Connection:
+    # check_same_thread=False for Streamlit (single-process) convenience
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")  # better concurrent reads
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
 
 
-def load_csv() -> pd.DataFrame:
-    if not os.path.exists(DATA_FILE):
-        st.error("❌ ไม่พบไฟล์ item_ORM.csv กรุณาวางไฟล์ไว้โฟลเดอร์เดียวกับไฟล์ .py")
-        st.stop()
-    return pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+def _init_db() -> None:
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS items (
+                item_name TEXT PRIMARY KEY,
+                stock INTEGER NOT NULL DEFAULT 0,
+                current_stock INTEGER NOT NULL DEFAULT 0,
+                exp_date TEXT,        -- ISO 'YYYY-MM-DD' (NULL allowed)
+                bundle TEXT
+            )
+            """
+        )
+        conn.commit()
 
+
+def _migrate_csv_to_db_if_needed() -> None:
+    """One-way import from legacy CSV into SQLite (first run only)."""
+    if not os.path.exists(LEGACY_CSV):
+        return
+
+    with _get_conn() as conn:
+        # If DB already has data, don't re-import
+        n = conn.execute("SELECT COUNT(1) FROM items").fetchone()[0]
+        if n and n > 0:
+            return
+
+    try:
+        df = pd.read_csv(LEGACY_CSV, encoding="utf-8-sig")
+    except Exception:
+        # If CSV can't be read, skip migration and let app run with empty DB
+        return
+
+    # Normalize expected columns
+    for col in ["Item_Name", "Stock", "Current_Stock", "EXP_Date"]:
+        if col not in df.columns:
+            return
+
+    # Optional columns
+    if "Bundle" not in df.columns:
+        df["Bundle"] = None
+
+    df["Item_Name"] = df["Item_Name"].astype(str).str.strip()
+    df["Stock"] = pd.to_numeric(df["Stock"], errors="coerce").fillna(0).astype(int)
+    df["Current_Stock"] = pd.to_numeric(df["Current_Stock"], errors="coerce")
+    df["Current_Stock"] = df["Current_Stock"].fillna(df["Stock"]).astype(int)
+
+    # Parse EXP_Date (accept dd/mm/YYYY or YYYY-mm-dd) -> ISO
+    exp_ts = pd.to_datetime(df["EXP_Date"], errors="coerce", dayfirst=True)
+    df["exp_iso"] = exp_ts.dt.strftime("%Y-%m-%d")
+
+    with _get_conn() as conn:
+        conn.executemany(
+            """
+            INSERT INTO items (item_name, stock, current_stock, exp_date, bundle)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(item_name) DO UPDATE SET
+                stock=excluded.stock,
+                current_stock=excluded.current_stock,
+                exp_date=excluded.exp_date,
+                bundle=excluded.bundle
+            """,
+            [
+                (
+                    r["Item_Name"],
+                    int(r["Stock"]),
+                    int(r["Current_Stock"]),
+                    (r["exp_iso"] if isinstance(r["exp_iso"], str) else None),
+                    (None if pd.isna(r["Bundle"]) else str(r["Bundle"]).strip()),
+                )
+                for _, r in df.iterrows()
+            ],
+        )
+        conn.commit()
+
+
+def load_items() -> pd.DataFrame:
+    _init_db()
+    _migrate_csv_to_db_if_needed()
+
+    with _get_conn() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                item_name AS Item_Name,
+                stock AS Stock,
+                current_stock AS Current_Stock,
+                exp_date AS EXP_Date,
+                bundle AS Bundle
+            FROM items
+            ORDER BY item_name
+            """,
+            conn,
+        )
+
+    # Clean types
+    if not df.empty:
+        df["Item_Name"] = df["Item_Name"].astype(str).str.strip()
+        df["Stock"] = pd.to_numeric(df["Stock"], errors="coerce").fillna(0).astype(int)
+        df["Current_Stock"] = pd.to_numeric(df["Current_Stock"], errors="coerce").fillna(df["Stock"]).astype(int)
+
+    return df
+
+
+def db_update_exp(item_name: str, new_exp: date) -> None:
+    exp_iso = pd.to_datetime(new_exp).strftime("%Y-%m-%d")
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET exp_date=? WHERE item_name=?",
+            (exp_iso, item_name),
+        )
+        conn.commit()
+
+
+def db_cut_stock(item_name: str, qty_use: int) -> None:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT current_stock FROM items WHERE item_name=?",
+            (item_name,),
+        ).fetchone()
+
+        cur = int(row[0]) if row and row[0] is not None else 0
+        if cur <= 0:
+            raise ValueError("Stock หมดแล้ว")
+        if qty_use > cur:
+            raise ValueError("จำนวนที่ใช้มากกว่า Stock ปัจจุบัน")
+
+        conn.execute(
+            "UPDATE items SET current_stock=? WHERE item_name=?",
+            (cur - int(qty_use), item_name),
+        )
+        conn.commit()
+
+
+def db_reset_stock(item_name: str) -> int:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT stock FROM items WHERE item_name=?",
+            (item_name,),
+        ).fetchone()
+        base = int(row[0]) if row and row[0] is not None else 0
+
+        conn.execute(
+            "UPDATE items SET current_stock=? WHERE item_name=?",
+            (base, item_name),
+        )
+        conn.commit()
+
+    return base
 
 # ==============================
 # 3) PREPARE DATA
 # ==============================
-df_items = load_csv()
+df_items = load_items()
 
 # Defensive: ensure expected columns exist
 for col in ["Item_Name", "Stock", "Current_Stock", "EXP_Date"]:
     if col not in df_items.columns:
-        st.error(f"❌ CSV ขาดคอลัมน์ที่จำเป็น: {col}")
+        st.error(f"❌ ข้อมูลขาดคอลัมน์ที่จำเป็น: {col}")
         st.stop()
 
 # Parse EXP_Date (accept both dd/mm/YYYY and YYYY-mm-dd)
@@ -474,10 +614,13 @@ with st.sidebar.expander("🛠 แก้ไขวันหมดอายุ (EX
             submitted = st.form_submit_button("💾 บันทึก EXP")
 
         if submitted:
-            df_items.loc[df_items["Item_Name"] == selected_item, "EXP_Date"] = pd.to_datetime(new_exp).strftime("%d/%m/%Y")
-            save_csv(df_items)
-            st.success("✅ บันทึกวันหมดอายุเรียบร้อยแล้ว")
-            st.rerun()
+            try:
+                db_update_exp(selected_item, new_exp)
+                st.success("✅ บันทึกวันหมดอายุเรียบร้อยแล้ว")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ บันทึกไม่สำเร็จ: {e}")
+
 
 with st.sidebar.expander("📦 ใช้ของ / ตัด Stock", expanded=False):
     if sel_row is None:
@@ -494,15 +637,13 @@ with st.sidebar.expander("📦 ใช้ของ / ตัด Stock", expanded=F
             cut = st.form_submit_button("✅ ตัด Stock")
 
         if cut:
-            if cur_stock <= 0:
-                st.error("❌ ของชิ้นนี้ Stock หมดแล้ว")
-            elif qty_use > cur_stock:
-                st.error("❌ จำนวนที่ใช้มากกว่า Stock ปัจจุบัน")
-            else:
-                df_items.loc[df_items["Item_Name"] == selected_item, "Current_Stock"] = cur_stock - int(qty_use)
-                save_csv(df_items)
-                st.success(f"✅ ตัด Stock แล้ว | คงเหลือ {cur_stock - int(qty_use)}")
+            try:
+                db_cut_stock(selected_item, int(qty_use))
+                st.success(f"✅ ตัด Stock แล้ว | ใช้ไป {int(qty_use)} ชิ้น")
                 st.rerun()
+            except Exception as e:
+                st.error(f"❌ ตัด Stock ไม่สำเร็จ: {e}")
+
 
 with st.sidebar.expander("🔄 รีเซ็ต Stock", expanded=False):
     if sel_row is None:
@@ -516,10 +657,12 @@ with st.sidebar.expander("🔄 รีเซ็ต Stock", expanded=False):
         with st.form("form_reset"):
             ok = st.form_submit_button("🔁 รีเซ็ตเป็นค่า Stock ปกติ")
         if ok:
-            df_items.loc[df_items["Item_Name"] == selected_item, "Current_Stock"] = base_stock
-            save_csv(df_items)
-            st.success(f"✅ รีเซ็ตแล้ว (Current_Stock = {base_stock})")
-            st.rerun()
+            try:
+                base = db_reset_stock(selected_item)
+                st.success(f"✅ รีเซ็ตแล้ว (Current_Stock = {base})")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ รีเซ็ตไม่สำเร็จ: {e}")
 
 
 # ==============================
