@@ -1,28 +1,30 @@
 # item_ipad_pro.py - Emergency Cart Checklist + Equipment Daily Check (iPad-friendly UI)
 # Notes:
-# - Emergency Cart: Uses CSV/SQLite as source
-# - Equipment Check: Uses separate SQLite tables
+# - Emergency Cart: Uses Turso cloud database
+# - Equipment Check: Uses separate Turso database
 # - iPad-friendly: bigger typography, forms, sticky sidebar
-# Version: 2.0 - Added Equipment Daily Check System
+# Version: 3.0 - Migrated to Turso Cloud Database
 
 import os
 import io
 import hmac
-import libsql_client as libsql
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
+# Import Turso wrapper
+from turso_wrapper import create_turso_connection, turso_read_sql, turso_to_sql
+
 # ==============================
 # TURSO DATABASE CONFIGURATION
 # ==============================
 
-# Emergency Cart Database (แทน item_orm.db)
+# Emergency Cart Database
 EMERGENCY_CART_URL = "libsql://emergency-cart-db-yanisa-sutthibun.aws-ap-northeast-1.turso.io"
 EMERGENCY_CART_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3Njc4NTQ1NzEsImlkIjoiYzY1YmJhYWMtNzg0Zi00NDljLWEzZTMtY2MxYzg0N2U1OThhIiwicmlkIjoiNjNlNTQxZjMtNzE5OS00ODAwLWJlNWItN2YxODZiYWYxM2EzIn0.gqXzxSsozlwAHiIPv8czFuDL4zNKzMc3rqBtyYL86XG93V-gJZDxD3mwG8GTuBpSLzBR7Hpnml1QuDBt3BYrAg"
 
-# Equipment Database (แทน equipment_daily.db)
+# Equipment Database
 EQUIPMENT_URL = "libsql://equipment-db-yanisa-sutthibun.aws-ap-northeast-1.turso.io"
 EQUIPMENT_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3Njc4NTQ1OTIsImlkIjoiMzA4ZjQwYWUtODQzMi00NGJjLTllMTYtMjcxNGU1Mzk1ZGZmIiwicmlkIjoiZjAzMzQwYmMtOWFjOS00MWIwLTk4NWItYTQ5MmI4NDg3NWU2In0.dO196Q_vGsTq8cCy1QhN_IU49TyxUQvZYe2gzLLxpCW0K6uIVsIPAxJn9ZIEmMHZVn0Ta9KZFHAmXSS8koGUCA"
 
@@ -379,10 +381,7 @@ LEGACY_CSV = os.path.join(BASE_DIR, "item_ORM.csv")
 
 def _get_conn():
     """Get connection to Emergency Cart database (Turso)"""
-    return libsql.connect(
-        database=EMERGENCY_CART_URL,
-        auth_token=EMERGENCY_CART_TOKEN
-    )
+    return create_turso_connection(EMERGENCY_CART_URL, EMERGENCY_CART_TOKEN)
 
 
 def _init_db() -> None:
@@ -514,7 +513,7 @@ def load_items() -> pd.DataFrame:
     _migrate_csv_to_db_if_needed()
     _seed_emergency_cart_if_empty_if_enabled()
     with _get_conn() as conn:
-        df = pd.read_sql_query(
+        df = turso_read_sql(
             """
             SELECT
                 item_name AS Item_Name,
@@ -592,10 +591,7 @@ EQUIPMENT_DB = _resolve_db_file("equipment_daily.db")
 
 def get_equipment_conn():
     """Get connection to Equipment database (Turso)"""
-    return libsql.connect(
-        database=EQUIPMENT_URL,
-        auth_token=EQUIPMENT_TOKEN
-    )
+    return create_turso_connection(EQUIPMENT_URL, EQUIPMENT_TOKEN)
 
 def init_equipment_db() -> None:
     with get_equipment_conn() as conn:
@@ -679,7 +675,7 @@ def load_equipment() -> pd.DataFrame:
     init_equipment_db()
     seed_initial_equipment()  # เพิ่มบรรทัดนี้ - จะ seed ครั้งเดียวถ้ายังไม่มีข้อมูล
     with get_equipment_conn() as conn:
-        df = pd.read_sql_query(
+        df = turso_read_sql(
             """
             SELECT 
                 id,
@@ -747,7 +743,7 @@ def add_daily_check(equipment_id: int, status: str, borrowed_to: str, remark: st
 def get_daily_checks(start_date: date, end_date: date) -> pd.DataFrame:
     init_equipment_db()  # เพิ่มบรรทัดนี้
     with get_equipment_conn() as conn:
-        df = pd.read_sql_query(
+        df = turso_read_sql(
             """
             SELECT 
                 e.name as equipment_name,
@@ -773,7 +769,7 @@ def get_latest_status() -> pd.DataFrame:
     """ดึงสถานะล่าสุดของแต่ละเครื่อง"""
     init_equipment_db()
     with get_equipment_conn() as conn:
-        df = pd.read_sql_query(
+        df = turso_read_sql(
             """
             SELECT 
                 e.id,
