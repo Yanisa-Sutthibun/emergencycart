@@ -1,5 +1,6 @@
 # Turso Database Wrapper for libsql-client
 # This wrapper makes libsql-client work like sqlite3
+# Version 2.0 - With connection pooling for better performance
 
 import libsql_client
 import pandas as pd
@@ -9,6 +10,9 @@ from typing import Any, List, Tuple, Optional
 
 # Enable nested event loops (required for Streamlit)
 nest_asyncio.apply()
+
+# Connection pool to reuse connections
+_connection_pool = {}
 
 def normalize_turso_url(url: str) -> str:
     """Convert libsql:// URL to proper format for libsql-client"""
@@ -36,6 +40,8 @@ class TursoConnection:
             url=normalized_url,
             auth_token=auth_token
         )
+        self.url = url
+        self.auth_token = auth_token
     
     def execute(self, sql: str, parameters: tuple = None):
         """Execute a single SQL statement"""
@@ -181,8 +187,22 @@ def turso_to_sql(df: pd.DataFrame, table_name: str, conn: TursoConnection,
 
 # Example usage functions
 def create_turso_connection(url: str, auth_token: str) -> TursoConnection:
-    """Create a Turso connection that works like sqlite3.Connection"""
-    return TursoConnection(url, auth_token)
+    """
+    Create a Turso connection that works like sqlite3.Connection
+    Uses connection pooling to reuse existing connections for better performance
+    """
+    # Create a unique key for this connection
+    key = f"{url}:{auth_token[:20]}"  # Use first 20 chars of token for key
+    
+    # Reuse existing connection if available
+    if key in _connection_pool:
+        return _connection_pool[key]
+    
+    # Create new connection and add to pool
+    conn = TursoConnection(url, auth_token)
+    _connection_pool[key] = conn
+    
+    return conn
 
 
 if __name__ == "__main__":

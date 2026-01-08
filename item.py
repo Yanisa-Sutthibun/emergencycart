@@ -508,6 +508,7 @@ def _seed_emergency_cart_if_empty_if_enabled() -> None:
         )
         conn.commit()
 
+@st.cache_data(ttl=30)  # Cache for 30 seconds
 def load_items() -> pd.DataFrame:
     _init_db()
     _migrate_csv_to_db_if_needed()
@@ -671,6 +672,7 @@ def seed_initial_equipment() -> None:
         )
         conn.commit()
 
+@st.cache_data(ttl=30)  # Cache for 30 seconds
 def load_equipment() -> pd.DataFrame:
     init_equipment_db()
     seed_initial_equipment()  # เพิ่มบรรทัดนี้ - จะ seed ครั้งเดียวถ้ายังไม่มีข้อมูล
