@@ -8,11 +8,23 @@
 import os
 import io
 import hmac
-import sqlite3
+import libsql_client as libsql
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+
+# ==============================
+# TURSO DATABASE CONFIGURATION
+# ==============================
+
+# Emergency Cart Database (แทน item_orm.db)
+EMERGENCY_CART_URL = "libsql://emergency-cart-db-yanisa-sutthibun.aws-ap-northeast-1.turso.io"
+EMERGENCY_CART_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3Njc4NTQ1NzEsImlkIjoiYzY1YmJhYWMtNzg0Zi00NDljLWEzZTMtY2MxYzg0N2U1OThhIiwicmlkIjoiNjNlNTQxZjMtNzE5OS00ODAwLWJlNWItN2YxODZiYWYxM2EzIn0.gqXzxSsozlwAHiIPv8czFuDL4zNKzMc3rqBtyYL86XG93V-gJZDxD3mwG8GTuBpSLzBR7Hpnml1QuDBt3BYrAg"
+
+# Equipment Database (แทน equipment_daily.db)
+EQUIPMENT_URL = "libsql://equipment-db-yanisa-sutthibun.aws-ap-northeast-1.turso.io"
+EQUIPMENT_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3Njc4NTQ1OTIsImlkIjoiMzA4ZjQwYWUtODQzMi00NGJjLTllMTYtMjcxNGU1Mzk1ZGZmIiwicmlkIjoiZjAzMzQwYmMtOWFjOS00MWIwLTk4NWItYTQ5MmI4NDg3NWU2In0.dO196Q_vGsTq8cCy1QhN_IU49TyxUQvZYe2gzLLxpCW0K6uIVsIPAxJn9ZIEmMHZVn0Ta9KZFHAmXSS8koGUCA"
 
 # ==============================
 #  CARD: BUNDLE STATUS BLOCK
@@ -365,13 +377,12 @@ DB_FILE = _resolve_db_file("item_orm.db")
 LEGACY_CSV = os.path.join(BASE_DIR, "item_ORM.csv")
 
 
-def _get_conn() -> sqlite3.Connection:
-    # check_same_thread=False for Streamlit (single-process) convenience
-    # timeout=30.0 to handle concurrent access better
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL;")  # better concurrent reads
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+def _get_conn():
+    """Get connection to Emergency Cart database (Turso)"""
+    return libsql.connect(
+        database=EMERGENCY_CART_URL,
+        auth_token=EMERGENCY_CART_TOKEN
+    )
 
 
 def _init_db() -> None:
@@ -579,17 +590,15 @@ def db_reset_stock(item_name: str) -> int:
 # ใช้ _resolve_db_file() เหมือน Emergency Cart เพื่อความมั่นคง
 EQUIPMENT_DB = _resolve_db_file("equipment_daily.db")
 
-def get_equipment_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(EQUIPMENT_DB, check_same_thread=False, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+def get_equipment_conn():
+    """Get connection to Equipment database (Turso)"""
+    return libsql.connect(
+        database=EQUIPMENT_URL,
+        auth_token=EQUIPMENT_TOKEN
+    )
 
 def init_equipment_db() -> None:
     with get_equipment_conn() as conn:
-        # เปิด foreign key support
-        conn.execute("PRAGMA foreign_keys = ON;")
-        
         # ตารางเครื่องมือหลัก
         conn.execute(
             """
