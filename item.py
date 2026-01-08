@@ -367,7 +367,8 @@ LEGACY_CSV = os.path.join(BASE_DIR, "item_ORM.csv")
 
 def _get_conn() -> sqlite3.Connection:
     # check_same_thread=False for Streamlit (single-process) convenience
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    # timeout=30.0 to handle concurrent access better
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL;")  # better concurrent reads
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
@@ -575,10 +576,11 @@ def db_reset_stock(item_name: str) -> int:
 # ==============================
 # 3) EQUIPMENT DAILY CHECK - DATABASE FUNCTIONS
 # ==============================
-EQUIPMENT_DB = os.path.join(BASE_DIR, "equipment_daily.db")
+# ใช้ _resolve_db_file() เหมือน Emergency Cart เพื่อความมั่นคง
+EQUIPMENT_DB = _resolve_db_file("equipment_daily.db")
 
 def get_equipment_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(EQUIPMENT_DB, check_same_thread=False)
+    conn = sqlite3.connect(EQUIPMENT_DB, check_same_thread=False, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
@@ -1265,15 +1267,29 @@ def make_alert_excel(sheets: list[tuple[str, pd.DataFrame]]) -> bytes:
 # ==============================
 # 8) SIDEBAR NAV + SINGLE ITEM PANEL - EMERGENCY CART
 # ==============================
+
+# 🔥 สำคัญมาก: Initialize ทั้ง 2 databases ตอนเริ่มโปรแกรม
+_init_db()  # Emergency Cart DB
+init_equipment_db()  # Equipment DB
+
 st.sidebar.title("📌 เมนูหลัก")
 
 st.sidebar.caption(f"🗄️ DB (Emergency Cart): {os.path.basename(DB_FILE)}")
-if not os.path.exists(DB_FILE):
-    st.sidebar.warning("⚠️ ยังไม่พบไฟล์ DB ตาม path นี้ (ระบบจะสร้างไฟล์ใหม่ที่นี่เมื่อเริ่มบันทึก)")
+st.sidebar.caption(f"🗄️ DB (Equipment): {os.path.basename(EQUIPMENT_DB)}")
 
-with st.sidebar.expander("ℹ️ DB path (สำหรับ debug)", expanded=False):
+if not os.path.exists(DB_FILE):
+    st.sidebar.warning("⚠️ ยังไม่พบไฟล์ Emergency Cart DB (ระบบจะสร้างเมื่อเริ่มบันทึก)")
+if not os.path.exists(EQUIPMENT_DB):
+    st.sidebar.warning("⚠️ ยังไม่พบไฟล์ Equipment DB (ระบบจะสร้างเมื่อเริ่มบันทึก)")
+
+with st.sidebar.expander("ℹ️ DB paths (สำหรับ debug)", expanded=False):
+    st.write("**Emergency Cart DB:**")
     st.code(DB_FILE)
-    st.write("มีไฟล์อยู่ไหม:", os.path.exists(DB_FILE))
+    st.write("มีไฟล์อยู่:", "✅" if os.path.exists(DB_FILE) else "❌")
+    
+    st.write("**Equipment DB:**")
+    st.code(EQUIPMENT_DB)
+    st.write("มีไฟล์อยู่:", "✅" if os.path.exists(EQUIPMENT_DB) else "❌")
 
 
 # Main navigation
