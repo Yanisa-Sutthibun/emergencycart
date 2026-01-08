@@ -1,6 +1,5 @@
 # Turso Database Wrapper for libsql-client
 # This wrapper makes libsql-client work like sqlite3
-# Version 2.0 - With connection pooling for better performance
 
 import libsql_client
 import pandas as pd
@@ -10,9 +9,6 @@ from typing import Any, List, Tuple, Optional
 
 # Enable nested event loops (required for Streamlit)
 nest_asyncio.apply()
-
-# Connection pool to reuse connections
-_connection_pool = {}
 
 def normalize_turso_url(url: str) -> str:
     """Convert libsql:// URL to proper format for libsql-client"""
@@ -42,9 +38,14 @@ class TursoConnection:
         )
         self.url = url
         self.auth_token = auth_token
+        self._closed = False
     
     def execute(self, sql: str, parameters: tuple = None):
         """Execute a single SQL statement"""
+        # Check if connection is closed
+        if self._closed:
+            raise Exception("Connection is closed. Create a new connection.")
+        
         try:
             if parameters:
                 result = self.client.execute(sql, parameters)
@@ -70,16 +71,19 @@ class TursoConnection:
     
     def close(self):
         """Close connection"""
-        try:
-            self.client.close()
-        except:
-            pass
+        if not self._closed:
+            try:
+                self.client.close()
+            except:
+                pass
+            self._closed = True
     
     def __enter__(self):
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        # Don't close on exit - let it be reused
+        # self.close()
         return False
 
 
@@ -187,22 +191,8 @@ def turso_to_sql(df: pd.DataFrame, table_name: str, conn: TursoConnection,
 
 # Example usage functions
 def create_turso_connection(url: str, auth_token: str) -> TursoConnection:
-    """
-    Create a Turso connection that works like sqlite3.Connection
-    Uses connection pooling to reuse existing connections for better performance
-    """
-    # Create a unique key for this connection
-    key = f"{url}:{auth_token[:20]}"  # Use first 20 chars of token for key
-    
-    # Reuse existing connection if available
-    if key in _connection_pool:
-        return _connection_pool[key]
-    
-    # Create new connection and add to pool
-    conn = TursoConnection(url, auth_token)
-    _connection_pool[key] = conn
-    
-    return conn
+    """Create a Turso connection that works like sqlite3.Connection"""
+    return TursoConnection(url, auth_token)
 
 
 if __name__ == "__main__":
