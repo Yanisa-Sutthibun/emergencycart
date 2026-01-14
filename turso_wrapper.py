@@ -1,14 +1,19 @@
 # Turso Database Wrapper for libsql-client
 # This wrapper makes libsql-client work like sqlite3
+# Fixed: Connection pooling and proper cleanup to prevent "Too many open files"
 
 import libsql_client
 import pandas as pd
 import asyncio
 import nest_asyncio
-from typing import Any, List, Tuple, Optional
+import atexit
+from typing import Any, List, Tuple, Optional, Dict
 
 # Enable nested event loops (required for Streamlit)
 nest_asyncio.apply()
+
+# Global connection pool
+_connection_pool: Dict[str, 'TursoConnection'] = {}
 
 def _validate_turso_config(url: str, auth_token: str) -> tuple[str, str]:
     """Validate and sanitize Turso connection parameters."""
@@ -60,12 +65,15 @@ class TursoConnection:
         self.url = url
         self.auth_token = auth_token
         self._closed = False
+        self._use_count = 0
     
     def execute(self, sql: str, parameters: tuple = None):
         """Execute a single SQL statement"""
         # Check if connection is closed
         if self._closed:
             raise Exception("Connection is closed. Create a new connection.")
+        
+        self._use_count += 1
         
         try:
             if parameters:
@@ -103,9 +111,13 @@ class TursoConnection:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Don't close on exit - let it be reused
-        # self.close()
+        # Close connection when exiting context manager
+        self.close()
         return False
+    
+    def __del__(self):
+        """Cleanup when object is garbage collected"""
+        self.close()
 
 
 class TursoCursor:
@@ -210,13 +222,46 @@ def turso_to_sql(df: pd.DataFrame, table_name: str, conn: TursoConnection,
         conn.execute(insert_sql, values)
 
 
-# Example usage functions
 def create_turso_connection(url: str, auth_token: str) -> TursoConnection:
-    """Create a Turso connection that works like sqlite3.Connection"""
-    return TursoConnection(url, auth_token)
+    """
+    Create or reuse a Turso connection with connection pooling
+    This prevents opening too many connections
+    """
+    # Create a key for this connection
+    conn_key = f"{url}:{auth_token[:20]}"  # Use first 20 chars of token for key
+    
+    # Check if we already have a connection for this URL
+    if conn_key in _connection_pool:
+        conn = _connection_pool[conn_key]
+        # Check if connection is still usable
+        if not conn._closed:
+            return conn
+        else:
+            # Remove closed connection from pool
+            del _connection_pool[conn_key]
+    
+    # Create new connection
+    conn = TursoConnection(url, auth_token)
+    _connection_pool[conn_key] = conn
+    return conn
+
+
+def close_all_connections():
+    """Close all connections in the pool"""
+    for conn_key in list(_connection_pool.keys()):
+        try:
+            _connection_pool[conn_key].close()
+        except:
+            pass
+        del _connection_pool[conn_key]
+
+
+# Register cleanup function to run on exit
+atexit.register(close_all_connections)
 
 
 if __name__ == "__main__":
     # Test the wrapper
     print("Turso wrapper loaded successfully!")
     print("Use: conn = create_turso_connection(url, token)")
+    print("Connections are now pooled and automatically cleaned up!")
