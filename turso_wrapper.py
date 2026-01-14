@@ -10,8 +10,26 @@ from typing import Any, List, Tuple, Optional
 # Enable nested event loops (required for Streamlit)
 nest_asyncio.apply()
 
+def _validate_turso_config(url: str, auth_token: str) -> tuple[str, str]:
+    """Validate and sanitize Turso connection parameters."""
+    url = (url or "").strip()
+    auth_token = (auth_token or "").strip()
+
+    if url.lower() in ("", ".", "none", "null"):
+        raise ValueError(
+            "Turso URL is missing (got empty/'.'). "
+            "Set EMERGENCY_CART_URL / EQUIPMENT_URL in Streamlit secrets or environment variables."
+        )
+    if auth_token.lower() in ("", "none", "null"):
+        raise ValueError(
+            "Turso auth token is missing. "
+            "Set EMERGENCY_CART_TOKEN / EQUIPMENT_TOKEN in Streamlit secrets or environment variables."
+        )
+    return url, auth_token
+
 def normalize_turso_url(url: str) -> str:
     """Convert libsql:// URL to proper format for libsql-client"""
+    url = (url or '').strip()
     if url.startswith('libsql://'):
         # Remove libsql:// prefix and add https://
         return 'https://' + url.replace('libsql://', '')
@@ -21,6 +39,9 @@ class TursoConnection:
     """Wrapper class to make libsql-client behave like sqlite3.Connection"""
     
     def __init__(self, url: str, auth_token: str):
+        # Validate config (avoid libsql URL_UNDEFINED)
+        url, auth_token = _validate_turso_config(url, auth_token)
+
         # Normalize URL
         normalized_url = normalize_turso_url(url)
         
