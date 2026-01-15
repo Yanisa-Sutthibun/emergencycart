@@ -852,8 +852,6 @@ def equipment_manage_page() -> None:
 # 10) SIDEBAR NAV
 # ==============================
 st.sidebar.title("📌 เมนูหลัก")
-st.sidebar.caption(f"🚑 Turso (Emergency): {_mask_url(EMERGENCY_CART_URL)}")
-st.sidebar.caption(f"🔧 Turso (Equipment): {_mask_url(EQUIPMENT_URL)}")
 st.sidebar.divider()
 
 main_page = st.sidebar.radio("เลือกระบบ", ["🚑 Emergency Cart", "🔧 เครื่องมืออุปกรณ์"], index=0)
