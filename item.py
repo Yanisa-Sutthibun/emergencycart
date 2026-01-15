@@ -418,6 +418,37 @@ def add_daily_check(equipment_id: int, status: str, borrowed_to: str, remark: st
             ),
         )
         conn.commit()
+        conn.commit()
+
+def add_equipment(name: str, pgh_code: str, serial_number: str) -> None:
+    """เพิ่มอุปกรณ์ใหม่"""
+    init_equipment_db()
+    with _get_equipment_conn() as conn:
+        conn.execute(
+            "INSERT INTO equipment (name, pgh_code, serial_number) VALUES (?, ?, ?)",
+            (name.strip(), pgh_code.strip(), serial_number.strip())
+        )
+        conn.commit()
+
+def update_equipment(equipment_id: int, name: str, pgh_code: str, serial_number: str) -> None:
+    """แก้ไขข้อมูลอุปกรณ์"""
+    init_equipment_db()
+    with _get_equipment_conn() as conn:
+        conn.execute(
+            "UPDATE equipment SET name=?, pgh_code=?, serial_number=? WHERE id=?",
+            (name.strip(), pgh_code.strip(), serial_number.strip(), equipment_id)
+        )
+        conn.commit()
+
+def delete_equipment(equipment_id: int) -> None:
+    """ลบอุปกรณ์ (และประวัติการตรวจสอบทั้งหมด)"""
+    init_equipment_db()
+    with _get_equipment_conn() as conn:
+        # ลบประวัติการตรวจสอบก่อน
+        conn.execute("DELETE FROM daily_checks WHERE equipment_id=?", (equipment_id,))
+        # ลบอุปกรณ์
+        conn.execute("DELETE FROM equipment WHERE id=?", (equipment_id,))
+        conn.commit()
 
 def get_latest_status() -> pd.DataFrame:
     init_equipment_db()
@@ -624,7 +655,41 @@ def equipment_dashboard_page() -> None:
     with c4:
         st.markdown(f'<div class="metric-card red"><h3>{not_ready}</h3><p>❌ ไม่พร้อมใช้</p></div>', unsafe_allow_html=True)
 
+
     st.divider()
+    
+    # ปุ่ม Download Excel
+    col_title, col_download = st.columns([3, 1])
+    with col_title:
+        st.subheader("📋 สถานะปัจจุบันของเครื่องมือ")
+    with col_download:
+        if not df_status.empty:
+            # เตรียมข้อมูลสำหรับ Excel
+            df_export = df_status[['name', 'pgh_code', 'serial_number', 'status', 'borrowed_to', 'remark']].copy()
+            df_export.columns = ['ชื่อเครื่องมือ', 'รหัส PGH', 'Serial Number', 'สถานะ', 'ยืมไปที่', 'หมายเหตุ']
+            
+            # แปลงเป็น Excel
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df_export.to_excel(writer, index=False, sheet_name='สถานะอุปกรณ์')
+                # Auto-adjust column width
+                worksheet = writer.sheets['สถานะอุปกรณ์']
+                for idx, col in enumerate(df_export.columns):
+                    max_length = max(
+                        df_export[col].astype(str).apply(len).max(),
+                        len(col)
+                    ) + 2
+                    worksheet.column_dimensions[chr(65 + idx)].width = min(max_length, 50)
+            
+            buffer.seek(0)
+            today_str = date.today().strftime("%Y%m%d")
+            st.download_button(
+                label="📥 ดาวน์โหลด Excel",
+                data=buffer,
+                file_name=f"equipment_status_{today_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
     st.subheader("📋 สถานะปัจจุบันของเครื่องมือ")
 
     if df_status.empty:
@@ -689,6 +754,99 @@ def equipment_daily_check_page() -> None:
                     st.error(f"❌ ผิดพลาด: {e}")
 
         st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+def equipment_manage_page() -> None:
+    """หน้าจัดการอุปกรณ์ (เพิ่ม/แก้ไข/ลบ)"""
+    st.title("🛠️ จัดการอุปกรณ์")
+    
+    # โหลดข้อมูลอุปกรณ์ก่อน (ใช้ทั้งสองแท็บ)
+    df_equipment = load_equipment()
+    
+    # แท็บสำหรับเพิ่มและแก้ไข
+    tab1, tab2 = st.tabs(["➕ เพิ่มอุปกรณ์ใหม่", "📝 แก้ไข/ลบอุปกรณ์"])
+    
+    # แท็บ 1: เพิ่มอุปกรณ์ใหม่
+    with tab1:
+        st.subheader("➕ เพิ่มอุปกรณ์ใหม่")
+        with st.form("add_equipment_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_name = st.text_input("ชื่อเครื่องมือ *", placeholder="เช่น BP monitor Vismo")
+                new_pgh = st.text_input("รหัส PGH", placeholder="เช่น 2808")
+            with col2:
+                new_sn = st.text_input("Serial Number", placeholder="เช่น 11288")
+            
+            submitted = st.form_submit_button("✅ เพิ่มอุปกรณ์", use_container_width=True, type="primary")
+            
+            if submitted:
+                if not new_name or not new_name.strip():
+                    st.error("❌ กรุณากรอกชื่อเครื่องมือ")
+                else:
+                    try:
+                        add_equipment(new_name, new_pgh or "", new_sn or "")
+                        st.cache_data.clear()
+                        st.success(f"✅ เพิ่มอุปกรณ์ '{new_name}' เรียบร้อยแล้ว")
+                        st.rerun()
+                    except Exception as e:
+                        if "UNIQUE constraint failed" in str(e):
+                            st.error(f"❌ ชื่อเครื่องมือ '{new_name}' มีอยู่ในระบบแล้ว")
+                        else:
+                            st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+    
+    # แท็บ 2: แก้ไข/ลบ
+    with tab2:
+        st.subheader("📝 แก้ไข/ลบอุปกรณ์")
+        
+        if df_equipment.empty:
+            st.info("ยังไม่มีอุปกรณ์ในระบบ กรุณาเพิ่มอุปกรณ์ในแท็บ 'เพิ่มอุปกรณ์ใหม่' ก่อน")
+            return
+        
+        # แสดงรายการอุปกรณ์
+        for _, equip in df_equipment.iterrows():
+            with st.expander(f"🔧 {equip['name']}", expanded=False):
+                st.markdown(f"**PGH:** {equip.get('pgh_code', '-')} | **SN:** {equip.get('serial_number', '-')}")
+                
+                # ฟอร์มแก้ไข
+                with st.form(f"edit_form_{equip['id']}"):
+                    st.markdown("### แก้ไขข้อมูล")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        edit_name = st.text_input("ชื่อเครื่องมือ", value=equip['name'], key=f"name_{equip['id']}")
+                        edit_pgh = st.text_input("รหัส PGH", value=equip.get('pgh_code', ''), key=f"pgh_{equip['id']}")
+                    with col2:
+                        edit_sn = st.text_input("Serial Number", value=equip.get('serial_number', ''), key=f"sn_{equip['id']}")
+                    
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        update_btn = st.form_submit_button("💾 บันทึกการแก้ไข", use_container_width=True, type="primary")
+                    with col_btn2:
+                        delete_btn = st.form_submit_button("🗑️ ลบอุปกรณ์", use_container_width=True, type="secondary")
+                    
+                    if update_btn:
+                        if not edit_name or not edit_name.strip():
+                            st.error("❌ กรุณากรอกชื่อเครื่องมือ")
+                        else:
+                            try:
+                                update_equipment(int(equip['id']), edit_name, edit_pgh or "", edit_sn or "")
+                                st.cache_data.clear()
+                                st.success(f"✅ แก้ไข '{edit_name}' เรียบร้อยแล้ว")
+                                st.rerun()
+                            except Exception as e:
+                                if "UNIQUE constraint failed" in str(e):
+                                    st.error(f"❌ ชื่อเครื่องมือ '{edit_name}' มีอยู่ในระบบแล้ว")
+                                else:
+                                    st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+                    
+                    if delete_btn:
+                        try:
+                            equip_name = equip['name']  # เก็บชื่อก่อนลบ
+                            delete_equipment(int(equip['id']))
+                            st.cache_data.clear()
+                            st.success(f"✅ ลบอุปกรณ์ '{equip_name}' เรียบร้อยแล้ว")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ ลบไม่สำเร็จ: {e}")
 
 # ==============================
 # 10) SIDEBAR NAV
@@ -770,7 +928,7 @@ if main_page == "🚑 Emergency Cart":
                     st.error(f"❌ รีเซ็ตไม่สำเร็จ: {e}")
 
 else:
-    equipment_page = st.sidebar.radio("เลือกหน้า", ["📊 Dashboard", "✅ ตรวจสอบรายวัน"], index=0)
+    equipment_page = st.sidebar.radio("เลือกหน้า", ["📊 Dashboard", "✅ ตรวจสอบรายวัน", "🛠️ จัดการอุปกรณ์"], index=0)
 
 # ==============================
 # 11) MAIN ROUTING
@@ -783,5 +941,7 @@ if main_page == "🚑 Emergency Cart":
 else:
     if equipment_page == "📊 Dashboard":
         equipment_dashboard_page()
-    else:
+    elif equipment_page == "✅ ตรวจสอบรายวัน":
         equipment_daily_check_page()
+    else:
+        equipment_manage_page()
